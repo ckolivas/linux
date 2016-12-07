@@ -26,6 +26,19 @@
 
 #if defined(CONFIG_IRQ_FORCED_THREADING) && !defined(CONFIG_PREEMPT_RT)
 DEFINE_STATIC_KEY_FALSE(force_irqthreads_key);
+#ifdef CONFIG_FORCE_IRQ_THREADING
+__read_mostly bool force_irqthreads = true;
+#else
+__read_mostly bool force_irqthreads;
+#endif
+EXPORT_SYMBOL_GPL(force_irqthreads);
+
+static int __init setup_noforced_irqthreads(char *arg)
+{
+	force_irqthreads = false;
+	return 0;
+}
+early_param("nothreadirqs", setup_noforced_irqthreads);
 
 static int __init setup_forced_irqthreads(char *arg)
 {
