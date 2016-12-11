@@ -15,6 +15,10 @@ NAME = Shy Crocodile
 PHONY := _all
 _all:
 
+CKVERSION = -ck1
+CKNAME = MuQSS Powered
+EXTRAVERSION := $(EXTRAVERSION)$(CKVERSION)
+
 # Do not use make's built-in rules and variables
 # (this increases performance and avoids hard-to-debug behaviour)
 MAKEFLAGS += -rR
