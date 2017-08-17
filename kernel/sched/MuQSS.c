@@ -561,7 +561,7 @@ static inline void smp_sched_reschedule(int cpu)
  * might also involve a cross-CPU call to trigger the scheduler on
  * the target CPU.
  */
-void resched_task(struct rq *rq, struct task_struct *p)
+static void resched_task(struct rq *rq, struct task_struct *p)
 {
 	int cpu;
 
