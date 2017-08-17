@@ -325,7 +325,7 @@ static inline struct rq *task_rq_lock(struct task_struct *p, unsigned long *flag
 {
 	struct rq *rq;
 
-	while (42) {
+	while (1) {
 		raw_spin_lock_irqsave(&p->pi_lock, *flags);
 		rq = task_rq(p);
 		raw_spin_lock(&rq->lock);
@@ -333,6 +333,8 @@ static inline struct rq *task_rq_lock(struct task_struct *p, unsigned long *flag
 			break;
 		raw_spin_unlock(&rq->lock);
 		raw_spin_unlock_irqrestore(&p->pi_lock, *flags);
+
+		cpu_relax();
 	}
 	return rq;
 }
@@ -352,12 +354,14 @@ static inline struct rq *__task_rq_lock(struct task_struct *p)
 
 	lockdep_assert_held(&p->pi_lock);
 
-	while (42) {
+	while (1) {
 		rq = task_rq(p);
 		raw_spin_lock(&rq->lock);
 		if (likely(rq == task_rq(p)))
 			break;
 		raw_spin_unlock(&rq->lock);
+
+		cpu_relax();
 	}
 	return rq;
 }
