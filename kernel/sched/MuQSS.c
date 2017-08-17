@@ -561,12 +561,11 @@ static inline void smp_sched_reschedule(int cpu)
  * might also involve a cross-CPU call to trigger the scheduler on
  * the target CPU.
  */
-void resched_task(struct task_struct *p)
+void resched_task(struct rq *rq, struct task_struct *p)
 {
 	int cpu;
-#ifdef CONFIG_LOCKDEP
-	struct rq *rq = task_rq(p);
 
+#ifdef CONFIG_LOCKDEP
 	lockdep_assert_held(&rq->lock);
 #endif
 	if (test_tsk_need_resched(p))
@@ -874,7 +873,7 @@ static inline int task_timeslice(struct task_struct *p)
 static inline void resched_if_idle(struct rq *rq)
 {
 	if (rq_idle(rq))
-		resched_task(rq->curr);
+		resched_task(rq, rq->curr);
 }
 
 static inline bool rq_local(struct rq *rq)
@@ -1159,7 +1158,7 @@ static inline void resched_suitable_idle(struct task_struct *p)
 
 static inline void resched_curr(struct rq *rq)
 {
-	resched_task(rq->curr);
+	resched_task(rq, rq->curr);
 }
 
 static inline void resched_if_idle(struct rq *rq)
@@ -4104,7 +4103,7 @@ void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task)
 	p->prio = prio;
 	if (task_running(rq, p)){
 		if (prio > oldprio)
-			resched_task(p);
+			resched_task(rq, p);
 	} else if (task_queued(p)) {
 		dequeue_task(rq, p, DEQUEUE_SAVE);
 		enqueue_task(rq, p, ENQUEUE_RESTORE);
@@ -4170,7 +4169,7 @@ void set_user_nice(struct task_struct *p, long nice)
 	} else if (task_running(rq, p)) {
 		set_rq_task(rq, p);
 		if (old_static < new_static)
-			resched_task(p);
+			resched_task(rq, p);
 	}
 out_unlock:
 	task_rq_unlock(rq, p, &flags);
@@ -4310,7 +4309,7 @@ static void __setscheduler(struct task_struct *p, struct rq *rq, int policy,
 
 	if (task_running(rq, p)) {
 		set_rq_task(rq, p);
-		resched_task(p);
+		resched_task(rq, p);
 	} else if (task_queued(p)) {
 		dequeue_task(rq, p, DEQUEUE_SAVE);
 		enqueue_task(rq, p, ENQUEUE_RESTORE);
@@ -5198,7 +5197,7 @@ again:
 		p->time_slice = timeslice();
 	time_slice_expired(rq_p, rq);
 	if (preempt && rq != p_rq)
-		resched_task(p_rq->curr);
+		resched_task(p_rq, p_rq->curr);
 	double_rq_unlock(rq, p_rq);
 out_irq:
 	local_irq_restore(flags);
@@ -5467,7 +5466,7 @@ void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
 
 		rq = __task_rq_lock(p);
 		set_task_cpu(p, valid_task_cpu(p));
-		resched_task(p);
+		resched_task(rq, p);
 		__task_rq_unlock(rq);
 	}
 }
@@ -5562,7 +5561,7 @@ void resched_cpu(int cpu)
 	unsigned long flags;
 
 	rq_lock_irqsave(rq, &flags);
-	resched_task(cpu_curr(cpu));
+	resched_task(rq, cpu_curr(cpu));
 	rq_unlock_irqrestore(rq, &flags);
 }
 
@@ -5739,7 +5738,7 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 			set_tsk_need_resched(p);
 			running_wrong = true;
 		} else
-			resched_task(p);
+			resched_task(rq, p);
 	} else {
 		int cpu = cpumask_any_and(cpu_valid_mask, new_mask);
 
