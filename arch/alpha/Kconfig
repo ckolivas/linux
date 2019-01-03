@@ -681,6 +681,8 @@ config HZ
 	default 1200 if HZ_1200
 	default 1024
 
+source "kernel/Kconfig.MuQSS"
+
 source "drivers/pci/Kconfig"
 source "drivers/eisa/Kconfig"
 

@@ -766,18 +766,15 @@ static inline u64 read_sum_exec_runtime(struct task_struct *t)
 	return tsk_seruntime(t);
 }
 #else
-struct rq *task_rq_lock(struct task_struct *p, unsigned long *flags);
-void task_rq_unlock(struct rq *rq, struct task_struct *p, unsigned long *flags);
-
 static inline u64 read_sum_exec_runtime(struct task_struct *t)
 {
-	unsigned long flags;
+	struct rq_flags rf;
 	u64 ns;
 	struct rq *rq;
 
-	rq = task_rq_lock(t, &flags);
+	rq = task_rq_lock(t, &rf);
 	ns = tsk_seruntime(t);
-	task_rq_unlock(rq, t, &flags);
+	task_rq_unlock(rq, t, &rf);
 
 	return ns;
 }
