@@ -234,7 +234,8 @@ struct rq {
 #endif /* CONFIG_PARAVIRT_TIME_ACCOUNTING */
 
 	u64 clock, old_clock, last_tick;
-	u64 clock_task;
+	/* Ensure that all clocks are in the same cache line */
+	u64 clock_task ____cacheline_aligned;
 	int dither;
 
 	int iso_ticks;
@@ -318,7 +319,7 @@ static inline int task_on_rq_queued(struct task_struct *p)
 
 static inline int task_on_rq_migrating(struct task_struct *p)
 {
-	return p->on_rq == TASK_ON_RQ_MIGRATING;
+	return READ_ONCE(p->on_rq) == TASK_ON_RQ_MIGRATING;
 }
 
 static inline void rq_lock(struct rq *rq)
@@ -497,7 +498,7 @@ extern struct static_key_false sched_schedstats;
 
 /*
  * The domain tree (rq->sd) is protected by RCU's quiescent state transition.
- * See detach_destroy_domains: synchronize_sched for details.
+ * See destroy_sched_domains: call_rcu for details.
  *
  * The domain tree of any CPU may only be accessed from within
  * preempt-disabled sections.

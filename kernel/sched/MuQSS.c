@@ -111,7 +111,7 @@
 
 void print_scheduler_version(void)
 {
-	printk(KERN_INFO "MuQSS CPU scheduler v0.190 by Con Kolivas.\n");
+	printk(KERN_INFO "MuQSS CPU scheduler v0.192 by Con Kolivas.\n");
 }
 
 #define RQSHARE_NONE 0
@@ -436,7 +436,7 @@ static inline bool trylock_rq(struct rq *this_rq, struct rq *rq)
 {
 	if (unlikely(!do_raw_spin_trylock(rq->lock)))
 		return false;
-	spin_acquire(rq->lock.dep_map, SINGLE_DEPTH_NESTING, 1, _RET_IP_);
+	spin_acquire(&rq->lock->dep_map, SINGLE_DEPTH_NESTING, 1, _RET_IP_);
 	synchronise_niffies(this_rq, rq);
 	return true;
 }
@@ -444,7 +444,7 @@ static inline bool trylock_rq(struct rq *this_rq, struct rq *rq)
 /* Unlock a specially nested trylocked rq */
 static inline void unlock_rq(struct rq *rq)
 {
-	spin_release(rq->lock.dep_map, 1, _RET_IP_);
+	spin_release(&rq->lock->dep_map, 1, _RET_IP_);
 	do_raw_spin_unlock(rq->lock);
 }
 
@@ -517,6 +517,30 @@ static bool set_nr_if_polling(struct task_struct *p)
 #endif
 #endif
 
+static bool __wake_q_add(struct wake_q_head *head, struct task_struct *task)
+{
+	struct wake_q_node *node = &task->wake_q;
+
+	/*
+	 * Atomically grab the task, if ->wake_q is !nil already it means
+	 * its already queued (either by us or someone else) and will get the
+	 * wakeup due to that.
+	 *
+	 * In order to ensure that a pending wakeup will observe our pending
+	 * state, even in the failed case, an explicit smp_mb() must be used.
+	 */
+	smp_mb__before_atomic();
+	if (unlikely(cmpxchg_relaxed(&node->next, NULL, WAKE_Q_TAIL)))
+		return false;
+
+	/*
+	 * The head is context local, there can be no concurrency.
+	 */
+	*head->lastp = node;
+	head->lastp = &node->next;
+	return true;
+}
+
 /**
  * wake_q_add() - queue a wakeup for 'later' waking.
  * @head: the wake_q_head to add @task to
@@ -531,27 +555,31 @@ static bool set_nr_if_polling(struct task_struct *p)
  */
 void wake_q_add(struct wake_q_head *head, struct task_struct *task)
 {
-	struct wake_q_node *node = &task->wake_q;
+	if (__wake_q_add(head, task))
+		get_task_struct(task);
+}
 
-	/*
-	 * Atomically grab the task, if ->wake_q is !nil already it means
-	 * its already queued (either by us or someone else) and will get the
-	 * wakeup due to that.
-	 *
-	 * In order to ensure that a pending wakeup will observe our pending
-	 * state, even in the failed case, an explicit smp_mb() must be used.
-	 */
-	smp_mb__before_atomic();
-	if (cmpxchg_relaxed(&node->next, NULL, WAKE_Q_TAIL))
-		return;
-
-	get_task_struct(task);
-
-	/*
-	 * The head is context local, there can be no concurrency.
-	 */
-	*head->lastp = node;
-	head->lastp = &node->next;
+/**
+ * wake_q_add_safe() - safely queue a wakeup for 'later' waking.
+ * @head: the wake_q_head to add @task to
+ * @task: the task to queue for 'later' wakeup
+ *
+ * Queue a task for later wakeup, most likely by the wake_up_q() call in the
+ * same context, _HOWEVER_ this is not guaranteed, the wakeup can come
+ * instantly.
+ *
+ * This function must be used as-if it were wake_up_process(); IOW the task
+ * must be ready to be woken at this location.
+ *
+ * This function is essentially a task-safe equivalent to wake_q_add(). Callers
+ * that already hold reference to @task can call the 'safe' version and trust
+ * wake_q to do the right thing depending whether or not the @task is already
+ * queued for wakeup.
+ */
+void wake_q_add_safe(struct wake_q_head *head, struct task_struct *task)
+{
+	if (!__wake_q_add(head, task))
+		put_task_struct(task);
 }
 
 void wake_up_q(struct wake_q_head *head)
@@ -1302,9 +1330,9 @@ void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 	}
 
 #ifdef CONFIG_THREAD_INFO_IN_TASK
-	p->cpu = new_cpu;
+	WRITE_ONCE(p->cpu, new_cpu);
 #else
-	task_thread_info(p)->cpu = new_cpu;
+	WRITE_ONCE(task_thread_info(p)->cpu, new_cpu);
 #endif
 	/* We're no longer protecting p after this point since we're holding
 	 * the wrong runqueue lock. */
@@ -1345,7 +1373,7 @@ static inline void return_task(struct task_struct *p, struct rq *rq,
 		 * lock is dropped in finish_lock_switch.
 		 */
 		if (unlikely(p->wake_cpu != cpu))
-			p->on_rq = TASK_ON_RQ_MIGRATING;
+			WRITE_ONCE(p->on_rq, TASK_ON_RQ_MIGRATING);
 		else
 #endif
 			enqueue_task(rq, p, ENQUEUE_RESTORE);
@@ -2124,6 +2152,7 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 #ifdef CONFIG_PREEMPT_NOTIFIERS
 	INIT_HLIST_HEAD(&p->preempt_notifiers);
 #endif
+
 	/*
 	 * We mark the process as NEW here. This guarantees that
 	 * nobody will actually run it, and a signal or other external
@@ -2552,10 +2581,10 @@ prepare_lock_switch(struct rq *rq, struct task_struct *next)
 	 * of the scheduler it's an obvious special-case), so we
 	 * do an early lockdep release here:
 	 */
-	spin_release(&rq->lock.dep_map, 1, _THIS_IP_);
+	spin_release(&rq->lock->dep_map, 1, _THIS_IP_);
 #ifdef CONFIG_DEBUG_SPINLOCK
 	/* this is a valid case when another task releases the spinlock */
-	rq->lock.owner = next;
+	rq->lock->owner = next;
 #endif
 }
 
@@ -2566,7 +2595,7 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 	 * fix up the runqueue lock - which gets 'carried over' from
 	 * prev into current:
 	 */
-	spin_acquire(&rq->lock.dep_map, 0, 0, _THIS_IP_);
+	spin_acquire(&rq->lock->dep_map, 0, 0, _THIS_IP_);
 
 #ifdef CONFIG_SMP
 	/*
@@ -6645,21 +6674,18 @@ void __init sched_init_smp(void)
 	/*
 	 * There's no userspace yet to cause hotplug operations; hence all the
 	 * cpu masks are stable and all blatant races in the below code cannot
-	 * happen. The hotplug lock is nevertheless taken to satisfy lockdep,
-	 * but there won't be any contention on it.
+	 * happen.
 	 */
-	cpus_read_lock();
 	mutex_lock(&sched_domains_mutex);
 	sched_init_domains(cpu_active_mask);
 	mutex_unlock(&sched_domains_mutex);
-	cpus_read_unlock();
 
 	/* Move init over to a non-isolated CPU */
 	if (set_cpus_allowed_ptr(current, housekeeping_cpumask(HK_FLAG_DOMAIN)) < 0)
 		BUG();
 
-	mutex_lock(&sched_domains_mutex);
 	local_irq_disable();
+	mutex_lock(&sched_domains_mutex);
 	lock_all_rqs();
 	/*
 	 * Set up the relative cache distance of each online cpu from each
@@ -6750,7 +6776,6 @@ void __init sched_init_smp(void)
 	}
 #endif
 	unlock_all_rqs();
-	local_irq_enable();
 	mutex_unlock(&sched_domains_mutex);
 
 	for_each_online_cpu(cpu) {
@@ -6830,6 +6855,8 @@ void __init sched_init_smp(void)
 			rq_unlock(rq);
 	}
 #endif /* CONFIG_SCHED_SMT */
+
+	local_irq_enable();
 
 	total_runqueues = 0;
 	for_each_possible_cpu(cpu) {
@@ -7101,6 +7128,34 @@ void __might_sleep(const char *file, int line, int preempt_offset)
 	___might_sleep(file, line, preempt_offset);
 }
 EXPORT_SYMBOL(__might_sleep);
+
+void __cant_sleep(const char *file, int line, int preempt_offset)
+{
+	static unsigned long prev_jiffy;
+
+	if (irqs_disabled())
+		return;
+
+	if (!IS_ENABLED(CONFIG_PREEMPT_COUNT))
+		return;
+
+	if (preempt_count() > preempt_offset)
+		return;
+
+	if (time_before(jiffies, prev_jiffy + HZ) && prev_jiffy)
+		return;
+	prev_jiffy = jiffies;
+
+	printk(KERN_ERR "BUG: assuming atomic context at %s:%d\n", file, line);
+	printk(KERN_ERR "in_atomic(): %d, irqs_disabled(): %d, pid: %d, name: %s\n",
+			in_atomic(), irqs_disabled(),
+			current->pid, current->comm);
+
+	debug_show_held_locks(current);
+	dump_stack();
+	add_taint(TAINT_WARN, LOCKDEP_STILL_OK);
+}
+EXPORT_SYMBOL_GPL(__cant_sleep);
 
 void ___might_sleep(const char *file, int line, int preempt_offset)
 {
