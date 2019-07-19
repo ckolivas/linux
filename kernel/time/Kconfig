@@ -66,6 +66,9 @@ config NO_HZ_COMMON
 	depends on !ARCH_USES_GETTIMEOFFSET && GENERIC_CLOCKEVENTS
 	select TICK_ONESHOT
 
+config NO_HZ_FULL
+	bool
+
 choice
 	prompt "Timer tick handling"
 	default NO_HZ_IDLE if NO_HZ
@@ -87,8 +90,9 @@ config NO_HZ_IDLE
 
 	  Most of the time you want to say Y here.
 
-config NO_HZ_FULL
+config NO_HZ_FULL_NODEF
 	bool "Full dynticks system (tickless)"
+	select NO_HZ_FULL
 	# NO_HZ_COMMON dependency
 	depends on !ARCH_USES_GETTIMEOFFSET && GENERIC_CLOCKEVENTS
 	# We need at least one periodic CPU for timekeeping
@@ -113,6 +117,8 @@ config NO_HZ_FULL
 	 This is implemented at the expense of some overhead in user <-> kernel
 	 transitions: syscalls, exceptions and interrupts. Even when it's
 	 dynamically off.
+
+	 Not recommended for desktops,laptops, or mobile devices.
 
 	 Say N.
 
