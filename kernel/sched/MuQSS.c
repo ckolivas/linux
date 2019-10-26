@@ -6749,7 +6749,11 @@ static bool cache_cpu_idle(struct rq *rq)
 /* MC siblings CPU mask which share the same LLC */
 static const cpumask_t *llc_core_cpumask(int cpu)
 {
+#ifdef CONFIG_X86
 	return per_cpu(cpu_llc_shared_map, cpu);
+#else
+	return topology_core_cpumask(cpu);
+#endif
 }
 #endif
 
@@ -7059,6 +7063,7 @@ void __init sched_init_smp(void)
 		}
 	}
 
+#ifdef CONFIG_X86
 	for_each_online_cpu(cpu) {
 		rq = cpu_rq(cpu);
 		for (i = 0; i < total_runqueues; i++) {
@@ -7074,6 +7079,7 @@ void __init sched_init_smp(void)
 			       rq->cpu_order[i]->cpu, per_cpu(cpu_llc_id, rq->cpu_order[i]->cpu));
 		}
 	}
+#endif
 
 	switch (rqshare) {
 		case RQSHARE_ALL:
