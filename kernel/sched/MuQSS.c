@@ -5939,6 +5939,7 @@ void init_idle(struct task_struct *idle, int cpu)
 	idle->state = TASK_RUNNING;
 	/* Setting prio to illegal value shouldn't matter when never queued */
 	idle->prio = PRIO_LIMIT;
+	idle->flags |= PF_IDLE;
 
 	kasan_unpoison_task_stack(idle);
 
