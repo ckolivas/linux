@@ -113,7 +113,7 @@
 
 void print_scheduler_version(void)
 {
-	printk(KERN_INFO "MuQSS CPU scheduler v0.199 by Con Kolivas.\n");
+	printk(KERN_INFO "MuQSS CPU scheduler v0.200 by Con Kolivas.\n");
 }
 
 /* Define RQ share levels */
