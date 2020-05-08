@@ -675,13 +675,6 @@ static inline bool task_queued(struct task_struct *p)
 static void enqueue_task(struct rq *rq, struct task_struct *p, int flags);
 static inline void resched_if_idle(struct rq *rq);
 
-/* Dodgy workaround till we figure out where the softirqs are going */
-static inline void do_pending_softirq(struct rq *rq, struct task_struct *next)
-{
-	if (unlikely(next == rq->idle && local_softirq_pending() && !in_interrupt()))
-		do_softirq_own_stack();
-}
-
 static inline bool deadline_before(u64 deadline, u64 time)
 {
 	return (deadline < time);
@@ -2608,9 +2601,6 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 	}
 #endif
 	rq_unlock(rq);
-
-	do_pending_softirq(rq, current);
-
 	local_irq_enable();
 }
 
@@ -4126,7 +4116,6 @@ static void __sched notrace __schedule(bool preempt)
 	} else {
 		check_siblings(rq);
 		rq_unlock(rq);
-		do_pending_softirq(rq, next);
 		local_irq_enable();
 	}
 }
