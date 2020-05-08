@@ -5,6 +5,7 @@
 #include <linux/sched/clock.h>
 #include <linux/sched/cpufreq.h>
 #include <linux/sched/cputime.h>
+#include <linux/sched/deadline.h>
 #include <linux/sched/debug.h>
 #include <linux/sched/hotplug.h>
 #include <linux/sched/init.h>
