@@ -6804,7 +6804,8 @@ static void __init select_leaders(void)
 					/* Set the smp_leader to the first CPU */
 					if (!leader)
 						leader = rq;
-					other_rq->smp_leader = leader;
+					if (!other_rq->smp_leader)
+						other_rq->smp_leader = leader;
 				}
 				if (rq->cpu_locality[other_cpu] > LOCALITY_SMP)
 					rq->cpu_locality[other_cpu] = LOCALITY_SMP;
@@ -6828,7 +6829,8 @@ static void __init select_leaders(void)
 					/* Set the mc_leader to the first CPU */
 					if (!leader)
 						leader = rq;
-					other_rq->mc_leader = leader;
+					if (!other_rq->mc_leader)
+						other_rq->mc_leader = leader;
 				}
 				if (rq->cpu_locality[other_cpu] > LOCALITY_MC) {
 					/* this is to get LLC into play even in case LLC sharing is not used */
@@ -6853,7 +6855,8 @@ static void __init select_leaders(void)
 					/* Set the smt_leader to the first CPU */
 					if (!leader)
 						leader = rq;
-					other_rq->smt_leader = leader;
+					if (!other_rq->smt_leader)
+						other_rq->smt_leader = leader;
 				}
 				if (rq->cpu_locality[other_cpu] > LOCALITY_SMT)
 					rq->cpu_locality[other_cpu] = LOCALITY_SMT;
@@ -6883,12 +6886,15 @@ static void __init select_leaders(void)
 /* FIXME freeing locked spinlock */
 static void __init share_and_free_rq(struct rq *leader, struct rq *rq)
 {
+	WARN_ON(rq->nr_running > 0);
+
 	kfree(rq->node);
 	kfree(rq->sl);
 	kfree(rq->lock);
 	rq->node = leader->node;
 	rq->sl = leader->sl;
 	rq->lock = leader->lock;
+	rq->is_leader = false;
 	barrier();
 	/* To make up for not unlocking the freed runlock */
 	preempt_enable();
@@ -6953,16 +6959,8 @@ static void __init setup_rq_orders(void)
 		int locality, total_rqs = 0, total_cpus = 0;
 
 		rq = cpu_rq(cpu);
-		if (
-#ifdef CONFIG_SCHED_MC
-		    (rq->mc_leader == rq) &&
-#endif
-#ifdef CONFIG_SCHED_SMT
-		    (rq->smt_leader == rq) &&
-#endif
-		    (rq->smp_leader == rq)) {
+		if (rq->is_leader)
 			total_runqueues++;
-		}
 
 		for (locality = LOCALITY_SAME; locality <= LOCALITY_DISTANT; locality++) {
 			int selected_cpus[NR_CPUS], selected_cpu_cnt, selected_cpu_idx, test_cpu_idx, cpu_idx, best_locality, test_cpu;
@@ -7025,14 +7023,7 @@ static void __init setup_rq_orders(void)
 				other_rq = cpu_rq(ordered_cpus[test_cpu]);
 				/* set up cpu orders */
 				rq->cpu_order[total_cpus++] = other_rq;
-				if (
-#ifdef CONFIG_SCHED_MC
-				    (other_rq->mc_leader == other_rq) &&
-#endif
-#ifdef CONFIG_SCHED_SMT
-				    (other_rq->smt_leader == other_rq) &&
-#endif
-				    (other_rq->smp_leader == other_rq)) {
+				if (other_rq->is_leader) {
 					/* set up RQ orders */
 					rq->rq_order[total_rqs++] = other_rq;
 				}
@@ -7211,12 +7202,13 @@ void __init sched_init(void)
 		rq->iso_ticks = 0;
 		rq->iso_refractory = false;
 #ifdef CONFIG_SMP
-		rq->smp_leader = rq;
+		rq->is_leader = true;
+		rq->smp_leader = NULL;
 #ifdef CONFIG_SCHED_MC
-		rq->mc_leader = rq;
+		rq->mc_leader = NULL;
 #endif
 #ifdef CONFIG_SCHED_SMT
-		rq->smt_leader = rq;
+		rq->smt_leader = NULL;
 #endif
 		rq->sd = NULL;
 		rq->rd = NULL;

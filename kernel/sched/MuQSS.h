@@ -243,6 +243,7 @@ struct rq {
 	struct rq **rq_order; /* Shared RQs ordered by relative cache distance */
 	struct rq **cpu_order; /* RQs of discrete CPUs ordered by distance */
 
+	bool is_leader;
 	struct rq *smp_leader; /* First physical CPU per node */
 #ifdef CONFIG_SCHED_SMT
 	struct rq *smt_leader; /* First logical CPU in SMT siblings */
