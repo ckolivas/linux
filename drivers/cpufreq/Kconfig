@@ -40,6 +40,7 @@ choice
 	default CPU_FREQ_DEFAULT_GOV_SCHEDUTIL if ARM64 || ARM
 	default CPU_FREQ_DEFAULT_GOV_SCHEDUTIL if X86_INTEL_PSTATE && SMP
 	default CPU_FREQ_DEFAULT_GOV_PERFORMANCE
+	default CPU_FREQ_DEFAULT_GOV_ONDEMAND if (SCHED_ALT || SCHED_MUQSS) && !(X86_INTEL_PSTATE)
 	help
 	  This option sets which CPUFreq governor shall be loaded at
 	  startup. If in doubt, use the default setting.
@@ -71,7 +72,7 @@ config CPU_FREQ_DEFAULT_GOV_USERSPACE
 
 config CPU_FREQ_DEFAULT_GOV_ONDEMAND
 	bool "ondemand"
-	depends on !(X86_INTEL_PSTATE && SMP)
+	depends on (SCHED_ALT || SCHED_MUQSS) && !(X86_INTEL_PSTATE && SMP)
 	select CPU_FREQ_GOV_ONDEMAND
 	select CPU_FREQ_GOV_PERFORMANCE
 	help
@@ -146,6 +147,7 @@ config CPU_FREQ_GOV_USERSPACE
 
 config CPU_FREQ_GOV_ONDEMAND
 	tristate "'ondemand' cpufreq policy governor"
+	default y if SCHED_ALT || SCHED_MUQSS
 	select CPU_FREQ_GOV_COMMON
 	help
 	  'ondemand' - This driver adds a dynamic cpufreq policy governor.
