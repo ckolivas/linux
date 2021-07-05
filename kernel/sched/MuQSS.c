@@ -1111,8 +1111,16 @@ static int best_mask_cpu(int best_cpu, struct rq *rq, cpumask_t *tmpmask)
 		CPUIDLE_DIFF_CORE_LLC | CPUIDLE_DIFF_THREAD;
 	int cpu_tmp;
 
-	if (cpumask_test_cpu(best_cpu, tmpmask))
+	if ((cpu_tmp = cpumask_weight(tmpmask)) < 2) {
+		if (cpu_tmp)
+			best_cpu = cpumask_first(tmpmask);
 		goto out;
+	}
+	else if (cpumask_test_cpu(best_cpu, tmpmask))
+#ifdef CONFIG_SCHED_SMT
+		if (cpumask_subset(&cpu_rq(best_cpu)->thread_mask, tmpmask))
+#endif
+			goto out;
 
 	for_each_cpu(cpu_tmp, tmpmask) {
 		int ranking, locality;
@@ -1120,32 +1128,30 @@ static int best_mask_cpu(int best_cpu, struct rq *rq, cpumask_t *tmpmask)
 
 		ranking = 0;
 		tmp_rq = cpu_rq(cpu_tmp);
-
 		locality = rq->cpu_locality[cpu_tmp];
+
 #ifdef CONFIG_NUMA
 		if (locality > LOCALITY_SMP)
 			ranking |= CPUIDLE_DIFF_NODE;
 		else
 #endif
-			if (locality > LOCALITY_MC)
-				ranking |= CPUIDLE_DIFF_CPU;
+		if (locality > LOCALITY_MC)
+			ranking |= CPUIDLE_DIFF_CPU;
 #ifdef CONFIG_SCHED_MC
-			else if (locality == LOCALITY_MC_LLC)
-				ranking |= CPUIDLE_DIFF_CORE_LLC;
-			else if (locality == LOCALITY_MC)
-				ranking |= CPUIDLE_DIFF_CORE;
+		else if (locality == LOCALITY_MC)
+			ranking |= CPUIDLE_DIFF_CORE;
+		else if (locality == LOCALITY_MC_LLC)
+			ranking |= CPUIDLE_DIFF_CORE_LLC;
 		if (!(tmp_rq->cache_idle(tmp_rq)))
 			ranking |= CPUIDLE_CACHE_BUSY;
 #endif
 #ifdef CONFIG_SCHED_SMT
 		if (locality == LOCALITY_SMT)
 			ranking |= CPUIDLE_DIFF_THREAD;
+		if (!(tmp_rq->siblings_idle(tmp_rq)))
+			ranking |= CPUIDLE_THREAD_BUSY;
 #endif
-		if (ranking < best_ranking
-#ifdef CONFIG_SCHED_SMT
-			|| (ranking == best_ranking && (tmp_rq->siblings_idle(tmp_rq)))
-#endif
-		) {
+		if (ranking < best_ranking) {
 			best_cpu = cpu_tmp;
 			best_ranking = ranking;
 		}
@@ -7593,7 +7599,7 @@ static void __init share_rqs(void)
 
 		rq_lock(rq);
 		if (leader && rq != leader) {
-			printk(KERN_INFO "MuQSS sharing SMP runqueue from CPU %d to CPU %d\n",
+			printk(KERN_DEBUG "MuQSS sharing SMP runqueue from CPU %d to CPU %d\n",
 			       leader->cpu, rq->cpu);
 			share_and_free_rq(leader, rq);
 		} else
@@ -7607,7 +7613,7 @@ static void __init share_rqs(void)
 
 		rq_lock(rq);
 		if (leader && rq != leader) {
-			printk(KERN_INFO "MuQSS sharing MC runqueue from CPU %d to CPU %d\n",
+			printk(KERN_DEBUG "MuQSS sharing MC runqueue from CPU %d to CPU %d\n",
 			       leader->cpu, rq->cpu);
 			share_and_free_rq(leader, rq);
 		} else
@@ -7622,7 +7628,7 @@ static void __init share_rqs(void)
 
 		rq_lock(rq);
 		if (leader && rq != leader) {
-			printk(KERN_INFO "MuQSS sharing SMT runqueue from CPU %d to CPU %d\n",
+			printk(KERN_DEBUG "MuQSS sharing SMT runqueue from CPU %d to CPU %d\n",
 			       leader->cpu, rq->cpu);
 			share_and_free_rq(leader, rq);
 		} else
@@ -7635,7 +7641,7 @@ static void __init setup_rq_orders(void)
 {
 	int *selected_cpus, *ordered_cpus;
 	struct rq *rq, *other_rq;
-	int cpu, other_cpu, i;
+	int cpu, other_cpu, i, j;
 
 	selected_cpus = kmalloc(sizeof(int) * NR_CPUS, GFP_ATOMIC);
 	ordered_cpus = kmalloc(sizeof(int) * NR_CPUS, GFP_ATOMIC);
@@ -7656,17 +7662,9 @@ static void __init setup_rq_orders(void)
 			selected_cpu_cnt = 0;
 
 			for_each_online_cpu(test_cpu) {
-				if (cpu < num_online_cpus() / 2)
-					other_cpu = cpu + test_cpu;
-				else
-					other_cpu = cpu - test_cpu;
-				if (other_cpu < 0)
-					other_cpu += num_online_cpus();
-				else
-					other_cpu %= num_online_cpus();
 				/* gather CPUs of the same locality */
-				if (rq->cpu_locality[other_cpu] == locality) {
-					selected_cpus[selected_cpu_cnt] = other_cpu;
+				if (rq->cpu_locality[test_cpu] == locality) {
+					selected_cpus[selected_cpu_cnt] = test_cpu;
 					selected_cpu_cnt++;
 				}
 			}
@@ -7721,19 +7719,32 @@ static void __init setup_rq_orders(void)
 	kfree(ordered_cpus);
 
 #ifdef CONFIG_X86
-	for_each_online_cpu(cpu) {
+	/* print CPU orders */
+	for (cpu = 0; cpu < num_online_cpus(); cpu++) {
 		rq = cpu_rq(cpu);
-		for (i = 0; i < total_runqueues; i++) {
-			printk(KERN_DEBUG "MuQSS CPU %d llc %d RQ order %d RQ %d llc %d\n", cpu, per_cpu(cpu_llc_id, cpu), i,
-			       rq->rq_order[i]->cpu, per_cpu(cpu_llc_id, rq->rq_order[i]->cpu));
+		printk(KERN_INFO "MuQSS CPU[LLC] order for CPU %d[%d]:", cpu, per_cpu(cpu_llc_id, cpu));
+		for (other_cpu = 0; other_cpu < num_online_cpus(); other_cpu++) {
+			printk(KERN_CONT "%s%d[%d]", (other_cpu > 0 ? ", " : " "), rq->cpu_order[other_cpu]->cpu, per_cpu(cpu_llc_id, rq->cpu_order[other_cpu]->cpu));
 		}
+		printk(KERN_CONT "\n");
 	}
 
-	for_each_online_cpu(cpu) {
+	/* print RQ orders */
+	i = 0;
+	for (cpu = 0; cpu < num_online_cpus(); cpu++) {
 		rq = cpu_rq(cpu);
-		for (i = 0; i < num_online_cpus(); i++) {
-			printk(KERN_DEBUG "MuQSS CPU %d llc %d CPU order %d RQ %d llc %d\n", cpu, per_cpu(cpu_llc_id, cpu), i,
-			       rq->cpu_order[i]->cpu, per_cpu(cpu_llc_id, rq->cpu_order[i]->cpu));
+		if (rq->is_leader) {
+			j = 0;
+			printk(KERN_INFO "MuQSS CPU[LLC] order for RQ[CPU,LLC] %d[%d,%d]:", i, rq->cpu, per_cpu(cpu_llc_id, rq->cpu));
+			for (other_cpu = 0; other_cpu < num_online_cpus(); other_cpu++) {
+				other_rq = cpu_rq(rq->cpu_order[other_cpu]->cpu);
+				if (rq->node == other_rq->node) {
+					printk(KERN_CONT "%s%d[%d]", (j > 0 ? ", " : " "), other_rq->cpu, per_cpu(cpu_llc_id, other_rq->cpu));
+					j++;
+				}
+			}
+			printk(KERN_CONT "\n");
+			i++;
 		}
 	}
 #endif
