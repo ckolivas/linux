@@ -29,6 +29,7 @@
 #include <asm/unistd.h>
 #include <asm/fpsimd.h>
 #include <asm/ptrace.h>
+#include <asm/syscall.h>
 #include <asm/signal32.h>
 #include <asm/traps.h>
 #include <asm/vdso.h>
@@ -890,7 +891,7 @@ static void do_signal(struct pt_regs *regs)
 		     retval == -ERESTART_RESTARTBLOCK ||
 		     (retval == -ERESTARTSYS &&
 		      !(ksig.ka.sa.sa_flags & SA_RESTART)))) {
-			regs->regs[0] = -EINTR;
+			syscall_set_return_value(current, regs, -EINTR, 0);
 			regs->pc = continue_addr;
 		}
 
@@ -914,13 +915,6 @@ static void do_signal(struct pt_regs *regs)
 asmlinkage void do_notify_resume(struct pt_regs *regs,
 				 unsigned long thread_flags)
 {
-	/*
-	 * The assembly code enters us with IRQs off, but it hasn't
-	 * informed the tracing code of that for efficiency reasons.
-	 * Update the trace code with the current status.
-	 */
-	trace_hardirqs_off();
-
 	do {
 		/* Check valid user FS if needed */
 		addr_limit_user_check();

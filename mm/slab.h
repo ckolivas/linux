@@ -110,8 +110,7 @@ __kmem_cache_alias(const char *name, unsigned int size, unsigned int align,
 		   slab_flags_t flags, void (*ctor)(void *));
 
 slab_flags_t kmem_cache_flags(unsigned int object_size,
-	slab_flags_t flags, const char *name,
-	void (*ctor)(void *));
+	slab_flags_t flags, const char *name);
 #else
 static inline struct kmem_cache *
 __kmem_cache_alias(const char *name, unsigned int size, unsigned int align,
@@ -119,8 +118,7 @@ __kmem_cache_alias(const char *name, unsigned int size, unsigned int align,
 { return NULL; }
 
 static inline slab_flags_t kmem_cache_flags(unsigned int object_size,
-	slab_flags_t flags, const char *name,
-	void (*ctor)(void *))
+	slab_flags_t flags, const char *name)
 {
 	return flags;
 }
@@ -328,7 +326,6 @@ static inline void memcg_slab_post_alloc_hook(struct kmem_cache *s,
 	if (!memcg_kmem_enabled() || !objcg)
 		return;
 
-	flags &= ~__GFP_ACCOUNT;
 	for (i = 0; i < size; i++) {
 		if (likely(p[i])) {
 			page = virt_to_head_page(p[i]);

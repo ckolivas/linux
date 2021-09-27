@@ -273,6 +273,24 @@ Contact: Daniel Vetter, Noralf Tronnes
 
 Level: Advanced
 
+Garbage collect fbdev scrolling acceleration
+--------------------------------------------
+
+Scroll acceleration is disabled in fbcon by hard-wiring p->scrollmode =
+SCROLL_REDRAW. There's a ton of code this will allow us to remove:
+- lots of code in fbcon.c
+- a bunch of the hooks in fbcon_ops, maybe the remaining hooks could be called
+  directly instead of the function table (with a switch on p->rotate)
+- fb_copyarea is unused after this, and can be deleted from all drivers
+
+Note that not all acceleration code can be deleted, since clearing and cursor
+support is still accelerated, which might be good candidates for further
+deletion projects.
+
+Contact: Daniel Vetter
+
+Level: Intermediate
+
 idr_init_base()
 ---------------
 
@@ -541,6 +559,27 @@ Some of these date from the very introduction of KMS in 2008 ...
   historical reasons) misnamed drm_primary_helper_destroy() function.
 
 Level: Intermediate
+
+Remove automatic page mapping from dma-buf importing
+----------------------------------------------------
+
+When importing dma-bufs, the dma-buf and PRIME frameworks automatically map
+imported pages into the importer's DMA area. drm_gem_prime_fd_to_handle() and
+drm_gem_prime_handle_to_fd() require that importers call dma_buf_attach()
+even if they never do actual device DMA, but only CPU access through
+dma_buf_vmap(). This is a problem for USB devices, which do not support DMA
+operations.
+
+To fix the issue, automatic page mappings should be removed from the
+buffer-sharing code. Fixing this is a bit more involved, since the import/export
+cache is also tied to &drm_gem_object.import_attach. Meanwhile we paper over
+this problem for USB devices by fishing out the USB host controller device, as
+long as that supports DMA. Otherwise importing can still needlessly fail.
+
+Contact: Thomas Zimmermann <tzimmermann@suse.de>, Daniel Vetter
+
+Level: Advanced
+
 
 Better Testing
 ==============

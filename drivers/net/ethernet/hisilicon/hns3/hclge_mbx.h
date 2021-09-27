@@ -134,7 +134,8 @@ struct hclge_mbx_vf_to_pf_cmd {
 	u8 mbx_need_resp;
 	u8 rsv1[1];
 	u8 msg_len;
-	u8 rsv2[3];
+	u8 rsv2;
+	u16 match_id;
 	struct hclge_vf_to_pf_msg msg;
 };
 
@@ -144,7 +145,8 @@ struct hclge_mbx_pf_to_vf_cmd {
 	u8 dest_vfid;
 	u8 rsv[3];
 	u8 msg_len;
-	u8 rsv1[3];
+	u8 rsv1;
+	u16 match_id;
 	struct hclge_pf_to_vf_msg msg;
 };
 
@@ -168,7 +170,7 @@ struct hclgevf_mbx_arq_ring {
 #define hclge_mbx_ring_ptr_move_crq(crq) \
 	(crq->next_to_use = (crq->next_to_use + 1) % crq->desc_num)
 #define hclge_mbx_tail_ptr_move_arq(arq) \
-	(arq.tail = (arq.tail + 1) % HCLGE_MBX_MAX_ARQ_MSG_SIZE)
+		(arq.tail = (arq.tail + 1) % HCLGE_MBX_MAX_ARQ_MSG_NUM)
 #define hclge_mbx_head_ptr_move_arq(arq) \
-		(arq.head = (arq.head + 1) % HCLGE_MBX_MAX_ARQ_MSG_SIZE)
+		(arq.head = (arq.head + 1) % HCLGE_MBX_MAX_ARQ_MSG_NUM)
 #endif

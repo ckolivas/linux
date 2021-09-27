@@ -210,6 +210,7 @@ static u32 vc4_get_fifo_full_level(struct vc4_crtc *vc4_crtc, u32 format)
 {
 	const struct vc4_crtc_data *crtc_data = vc4_crtc_to_vc4_crtc_data(vc4_crtc);
 	const struct vc4_pv_data *pv_data = vc4_crtc_to_vc4_pv_data(vc4_crtc);
+	struct vc4_dev *vc4 = to_vc4_dev(vc4_crtc->base.dev);
 	u32 fifo_len_bytes = pv_data->fifo_depth;
 
 	/*
@@ -237,6 +238,22 @@ static u32 vc4_get_fifo_full_level(struct vc4_crtc *vc4_crtc, u32 format)
 		 */
 		if (crtc_data->hvs_output == 5)
 			return 32;
+
+		/*
+		 * It looks like in some situations, we will overflow
+		 * the PixelValve FIFO (with the bit 10 of PV stat being
+		 * set) and stall the HVS / PV, eventually resulting in
+		 * a page flip timeout.
+		 *
+		 * Displaying the video overlay during a playback with
+		 * Kodi on an RPi3 seems to be a great solution with a
+		 * failure rate around 50%.
+		 *
+		 * Removing 1 from the FIFO full level however
+		 * seems to completely remove that issue.
+		 */
+		if (!vc4->hvs->hvs5)
+			return fifo_len_bytes - 3 * HVS_FIFO_LATENCY_PIX - 1;
 
 		return fifo_len_bytes - 3 * HVS_FIFO_LATENCY_PIX;
 	}
@@ -984,7 +1001,7 @@ static const struct vc4_pv_data bcm2711_pv3_data = {
 	.fifo_depth = 64,
 	.pixels_per_clock = 1,
 	.encoder_types = {
-		[0] = VC4_ENCODER_TYPE_VEC,
+		[PV_CONTROL_CLK_SELECT_VEC] = VC4_ENCODER_TYPE_VEC,
 	},
 };
 
@@ -1024,6 +1041,9 @@ static void vc4_set_crtc_possible_masks(struct drm_device *drm,
 	drm_for_each_encoder(encoder, drm) {
 		struct vc4_encoder *vc4_encoder;
 		int i;
+
+		if (encoder->encoder_type == DRM_MODE_ENCODER_VIRTUAL)
+			continue;
 
 		vc4_encoder = to_vc4_encoder(encoder);
 		for (i = 0; i < ARRAY_SIZE(pv_data->encoder_types); i++) {

@@ -1250,12 +1250,14 @@ static void tx_only(struct xsk_socket_info *xsk, u32 *frame_nb, int batch_size)
 	while (xsk_ring_prod__reserve(&xsk->tx, batch_size, &idx) <
 				      batch_size) {
 		complete_tx_only(xsk, batch_size);
+		if (benchmark_done)
+			return;
 	}
 
 	for (i = 0; i < batch_size; i++) {
 		struct xdp_desc *tx_desc = xsk_ring_prod__tx_desc(&xsk->tx,
 								  idx + i);
-		tx_desc->addr = (*frame_nb + i) << XSK_UMEM__DEFAULT_FRAME_SHIFT;
+		tx_desc->addr = (*frame_nb + i) * opt_xsk_frame_size;
 		tx_desc->len = PKT_SIZE;
 	}
 
@@ -1540,6 +1542,8 @@ int main(int argc, char **argv)
 		pthread_join(pt, NULL);
 
 	xdpsock_cleanup();
+
+	munmap(bufs, NUM_FRAMES * opt_xsk_frame_size);
 
 	return 0;
 }

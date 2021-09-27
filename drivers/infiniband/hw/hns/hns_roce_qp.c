@@ -286,7 +286,7 @@ static int alloc_qpc(struct hns_roce_dev *hr_dev, struct hns_roce_qp *hr_qp)
 		}
 	}
 
-	if (hr_dev->caps.sccc_sz) {
+	if (hr_dev->caps.flags & HNS_ROCE_CAP_FLAG_QP_FLOW_CTRL) {
 		/* Alloc memory for SCC CTX */
 		ret = hns_roce_table_get(hr_dev, &qp_table->sccc_table,
 					 hr_qp->qpn);
@@ -432,7 +432,12 @@ static int set_extend_sge_param(struct hns_roce_dev *hr_dev, u32 sq_wqe_cnt,
 	}
 
 	hr_qp->sge.sge_shift = HNS_ROCE_SGE_SHIFT;
-	hr_qp->sge.sge_cnt = cnt;
+
+	/* If the number of extended sge is not zero, they MUST use the
+	 * space of HNS_HW_PAGE_SIZE at least.
+	 */
+	hr_qp->sge.sge_cnt = cnt ?
+			max(cnt, (u32)HNS_HW_PAGE_SIZE / HNS_ROCE_SGE_SIZE) : 0;
 
 	return 0;
 }
@@ -735,7 +740,6 @@ static int alloc_qp_db(struct hns_roce_dev *hr_dev, struct hns_roce_qp *hr_qp,
 				goto err_out;
 			}
 			hr_qp->en_flags |= HNS_ROCE_QP_CAP_SQ_RECORD_DB;
-			resp->cap_flags |= HNS_ROCE_QP_CAP_SQ_RECORD_DB;
 		}
 
 		if (user_qp_has_rdb(hr_dev, init_attr, udata, resp)) {
@@ -747,7 +751,6 @@ static int alloc_qp_db(struct hns_roce_dev *hr_dev, struct hns_roce_qp *hr_qp,
 				goto err_sdb;
 			}
 			hr_qp->en_flags |= HNS_ROCE_QP_CAP_RQ_RECORD_DB;
-			resp->cap_flags |= HNS_ROCE_QP_CAP_RQ_RECORD_DB;
 		}
 	} else {
 		/* QP doorbell register address */
@@ -860,9 +863,12 @@ static int set_qp_param(struct hns_roce_dev *hr_dev, struct hns_roce_qp *hr_qp,
 	}
 
 	if (udata) {
-		if (ib_copy_from_udata(ucmd, udata, sizeof(*ucmd))) {
-			ibdev_err(ibdev, "Failed to copy QP ucmd\n");
-			return -EFAULT;
+		ret = ib_copy_from_udata(ucmd, udata,
+					 min(udata->inlen, sizeof(*ucmd)));
+		if (ret) {
+			ibdev_err(ibdev,
+				  "failed to copy QP ucmd, ret = %d\n", ret);
+			return ret;
 		}
 
 		ret = set_user_sq_size(hr_dev, &init_attr->cap, hr_qp, ucmd);
@@ -951,6 +957,7 @@ static int hns_roce_create_qp_common(struct hns_roce_dev *hr_dev,
 	}
 
 	if (udata) {
+		resp.cap_flags = hr_qp->en_flags;
 		ret = ib_copy_to_udata(udata, &resp,
 				       min(udata->outlen, sizeof(resp)));
 		if (ret) {

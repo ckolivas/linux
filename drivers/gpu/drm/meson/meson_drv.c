@@ -389,15 +389,17 @@ static void meson_drv_unbind(struct device *dev)
 		meson_canvas_free(priv->canvas, priv->canvas_id_vd1_2);
 	}
 
+	drm_dev_unregister(drm);
+	drm_kms_helper_poll_fini(drm);
+	drm_atomic_helper_shutdown(drm);
+	component_unbind_all(dev, drm);
+	drm_irq_uninstall(drm);
+	drm_dev_put(drm);
+
 	if (priv->afbcd.ops) {
 		priv->afbcd.ops->reset(priv);
 		meson_rdma_free(priv);
 	}
-
-	drm_dev_unregister(drm);
-	drm_irq_uninstall(drm);
-	drm_kms_helper_poll_fini(drm);
-	drm_dev_put(drm);
 }
 
 static const struct component_master_ops meson_drv_master_ops = {
@@ -480,6 +482,17 @@ static int meson_probe_remote(struct platform_device *pdev,
 	return count;
 }
 
+static void meson_drv_shutdown(struct platform_device *pdev)
+{
+	struct meson_drm *priv = dev_get_drvdata(&pdev->dev);
+
+	if (!priv)
+		return;
+
+	drm_kms_helper_poll_fini(priv->drm);
+	drm_atomic_helper_shutdown(priv->drm);
+}
+
 static int meson_drv_probe(struct platform_device *pdev)
 {
 	struct component_match *match = NULL;
@@ -551,6 +564,7 @@ static const struct dev_pm_ops meson_drv_pm_ops = {
 
 static struct platform_driver meson_drm_platform_driver = {
 	.probe      = meson_drv_probe,
+	.shutdown   = meson_drv_shutdown,
 	.driver     = {
 		.name	= "meson-drm",
 		.of_match_table = dt_match,

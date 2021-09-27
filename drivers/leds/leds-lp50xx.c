@@ -487,13 +487,16 @@ static int lp50xx_probe_dt(struct lp50xx *priv)
 		 */
 		mc_led_info = devm_kcalloc(priv->dev, LP50XX_LEDS_PER_MODULE,
 					   sizeof(*mc_led_info), GFP_KERNEL);
-		if (!mc_led_info)
-			return -ENOMEM;
+		if (!mc_led_info) {
+			ret = -ENOMEM;
+			goto child_out;
+		}
 
 		fwnode_for_each_child_node(child, led_node) {
 			ret = fwnode_property_read_u32(led_node, "color",
 						       &color_id);
 			if (ret) {
+				fwnode_handle_put(led_node);
 				dev_err(priv->dev, "Cannot read color\n");
 				goto child_out;
 			}
@@ -517,7 +520,6 @@ static int lp50xx_probe_dt(struct lp50xx *priv)
 			goto child_out;
 		}
 		i++;
-		fwnode_handle_put(child);
 	}
 
 	return 0;

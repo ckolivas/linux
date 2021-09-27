@@ -600,7 +600,7 @@ static struct notifier_block nfsd_file_lease_notifier = {
 static int
 nfsd_file_fsnotify_handle_event(struct fsnotify_mark *mark, u32 mask,
 				struct inode *inode, struct inode *dir,
-				const struct qstr *name)
+				const struct qstr *name, u32 cookie)
 {
 	trace_nfsd_file_fsnotify_handle_event(inode, mask);
 
@@ -896,6 +896,8 @@ nfsd_file_find_locked(struct inode *inode, unsigned int may_flags,
 		if (nf->nf_net != net)
 			continue;
 		if (!nfsd_match_cred(nf->nf_cred, current_cred()))
+			continue;
+		if (!test_bit(NFSD_FILE_HASHED, &nf->nf_flags))
 			continue;
 		if (nfsd_file_get(nf) != NULL)
 			return nf;

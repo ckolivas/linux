@@ -14,6 +14,7 @@
 #include <linux/slab.h>
 #include <linux/blk-mq-pci.h>
 #include <linux/refcount.h>
+#include <linux/crash_dump.h>
 
 #include <scsi/scsi_tcq.h>
 #include <scsi/scsicam.h>
@@ -42,7 +43,7 @@ MODULE_PARM_DESC(ql2xfulldump_on_mpifail,
 int ql2xenforce_iocb_limit = 1;
 module_param(ql2xenforce_iocb_limit, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(ql2xenforce_iocb_limit,
-		 "Enforce IOCB throttling, to avoid FW congestion. (default: 0)");
+		 "Enforce IOCB throttling, to avoid FW congestion. (default: 1)");
 
 /*
  * CT6 CTX allocation cache
@@ -1008,8 +1009,6 @@ qla2xxx_mqueuecommand(struct Scsi_Host *host, struct scsi_cmnd *cmd,
 	if (rval != QLA_SUCCESS) {
 		ql_dbg(ql_dbg_io + ql_dbg_verbose, vha, 0x3078,
 		    "Start scsi failed rval=%d for cmd=%p.\n", rval, cmd);
-		if (rval == QLA_INTERFACE_ERROR)
-			goto qc24_free_sp_fail_command;
 		goto qc24_host_busy_free_sp;
 	}
 
@@ -1020,11 +1019,6 @@ qc24_host_busy_free_sp:
 
 qc24_target_busy:
 	return SCSI_MLQUEUE_TARGET_BUSY;
-
-qc24_free_sp_fail_command:
-	sp->free(sp);
-	CMD_SP(cmd) = NULL;
-	qla2xxx_rel_qpair_sp(sp->qpair, sp);
 
 qc24_fail_command:
 	cmd->scsi_done(cmd);
@@ -2833,6 +2827,11 @@ qla2x00_probe_one(struct pci_dev *pdev, const struct pci_device_id *id)
 	} else {
 		if (pci_enable_device(pdev))
 			return ret;
+	}
+
+	if (is_kdump_kernel()) {
+		ql2xmqsupport = 0;
+		ql2xallocfwdump = 0;
 	}
 
 	/* This may fail but that's ok */

@@ -257,6 +257,8 @@ static void init_device_table_dma(void);
 
 static bool amd_iommu_pre_enabled = true;
 
+static u32 amd_iommu_ivinfo __initdata;
+
 bool translation_pre_enabled(struct amd_iommu *iommu)
 {
 	return (iommu->flags & AMD_IOMMU_FLAG_TRANS_PRE_ENABLED);
@@ -294,6 +296,18 @@ static inline unsigned long tbl_size(int entry_size)
 int amd_iommu_get_num_iommus(void)
 {
 	return amd_iommus_present;
+}
+
+/*
+ * For IVHD type 0x11/0x40, EFR is also available via IVHD.
+ * Default to IVHD EFR since it is available sooner
+ * (i.e. before PCI init).
+ */
+static void __init early_iommu_features_init(struct amd_iommu *iommu,
+					     struct ivhd_header *h)
+{
+	if (amd_iommu_ivinfo & IOMMU_IVINFO_EFRSUP)
+		iommu->features = h->efr_reg;
 }
 
 /* Access to l1 and l2 indexed register spaces */
@@ -1584,6 +1598,9 @@ static int __init init_iommu_one(struct amd_iommu *iommu, struct ivhd_header *h)
 		if ((h->efr_reg & BIT(IOMMU_EFR_XTSUP_SHIFT)) &&
 		    (h->efr_reg & BIT(IOMMU_EFR_MSICAPMMIOSUP_SHIFT)))
 			amd_iommu_xt_mode = IRQ_REMAP_X2APIC_MODE;
+
+		early_iommu_features_init(iommu, h);
+
 		break;
 	default:
 		return -EINVAL;
@@ -1700,32 +1717,15 @@ static int __init init_iommu_all(struct acpi_table_header *table)
 	return 0;
 }
 
-static int iommu_pc_get_set_reg(struct amd_iommu *iommu, u8 bank, u8 cntr,
-				u8 fxn, u64 *value, bool is_write);
-
 static void init_iommu_perf_ctr(struct amd_iommu *iommu)
 {
+	u64 val;
 	struct pci_dev *pdev = iommu->dev;
-	u64 val = 0xabcd, val2 = 0, save_reg = 0;
 
 	if (!iommu_feature(iommu, FEATURE_PC))
 		return;
 
 	amd_iommu_pc_present = true;
-
-	/* save the value to restore, if writable */
-	if (iommu_pc_get_set_reg(iommu, 0, 0, 0, &save_reg, false))
-		goto pc_false;
-
-	/* Check if the performance counters can be written to */
-	if ((iommu_pc_get_set_reg(iommu, 0, 0, 0, &val, true)) ||
-	    (iommu_pc_get_set_reg(iommu, 0, 0, 0, &val2, false)) ||
-	    (val != val2))
-		goto pc_false;
-
-	/* restore */
-	if (iommu_pc_get_set_reg(iommu, 0, 0, 0, &save_reg, true))
-		goto pc_false;
 
 	pci_info(pdev, "IOMMU performance counters supported\n");
 
@@ -1733,11 +1733,6 @@ static void init_iommu_perf_ctr(struct amd_iommu *iommu)
 	iommu->max_banks = (u8) ((val >> 12) & 0x3f);
 	iommu->max_counters = (u8) ((val >> 7) & 0xf);
 
-	return;
-
-pc_false:
-	pci_err(pdev, "Unable to read/write to IOMMU perf counter.\n");
-	amd_iommu_pc_present = false;
 	return;
 }
 
@@ -1775,6 +1770,35 @@ static const struct attribute_group *amd_iommu_groups[] = {
 	NULL,
 };
 
+/*
+ * Note: IVHD 0x11 and 0x40 also contains exact copy
+ * of the IOMMU Extended Feature Register [MMIO Offset 0030h].
+ * Default to EFR in IVHD since it is available sooner (i.e. before PCI init).
+ */
+static void __init late_iommu_features_init(struct amd_iommu *iommu)
+{
+	u64 features;
+
+	if (!(iommu->cap & (1 << IOMMU_CAP_EFR)))
+		return;
+
+	/* read extended feature bits */
+	features = readq(iommu->mmio_base + MMIO_EXT_FEATURES);
+
+	if (!iommu->features) {
+		iommu->features = features;
+		return;
+	}
+
+	/*
+	 * Sanity check and warn if EFR values from
+	 * IVHD and MMIO conflict.
+	 */
+	if (features != iommu->features)
+		pr_warn(FW_WARN "EFR mismatch. Use IVHD EFR (%#llx : %#llx).\n",
+			features, iommu->features);
+}
+
 static int __init iommu_init_pci(struct amd_iommu *iommu)
 {
 	int cap_ptr = iommu->cap_ptr;
@@ -1794,8 +1818,7 @@ static int __init iommu_init_pci(struct amd_iommu *iommu)
 	if (!(iommu->cap & (1 << IOMMU_CAP_IOTLB)))
 		amd_iommu_iotlb_sup = false;
 
-	/* read extended feature bits */
-	iommu->features = readq(iommu->mmio_base + MMIO_EXT_FEATURES);
+	late_iommu_features_init(iommu);
 
 	if (iommu_feature(iommu, FEATURE_GT)) {
 		int glxval;
@@ -1891,8 +1914,8 @@ static void print_iommu_info(void)
 		pci_info(pdev, "Found IOMMU cap 0x%hx\n", iommu->cap_ptr);
 
 		if (iommu->cap & (1 << IOMMU_CAP_EFR)) {
-			pci_info(pdev, "Extended features (%#llx):",
-				 iommu->features);
+			pr_info("Extended features (%#llx):", iommu->features);
+
 			for (i = 0; i < ARRAY_SIZE(feat_str); ++i) {
 				if (iommu_feature(iommu, (1ULL << i)))
 					pr_cont(" %s", feat_str[i]);
@@ -2525,6 +2548,11 @@ static void __init free_dma_resources(void)
 	free_unity_maps();
 }
 
+static void __init ivinfo_init(void *ivrs)
+{
+	amd_iommu_ivinfo = *((u32 *)(ivrs + IOMMU_IVINFO_OFFSET));
+}
+
 /*
  * This is the hardware init function for AMD IOMMU in the system.
  * This function is called either from amd_iommu_init or from the interrupt
@@ -2578,6 +2606,8 @@ static int __init early_amd_iommu_init(void)
 	ret = check_ivrs_checksum(ivrs_base);
 	if (ret)
 		goto out;
+
+	ivinfo_init(ivrs_base);
 
 	amd_iommu_target_ivhd_type = get_highest_supported_ivhd_type(ivrs_base);
 	DUMP_printk("Using IVHD type %#x\n", amd_iommu_target_ivhd_type);

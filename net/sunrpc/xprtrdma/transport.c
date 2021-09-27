@@ -249,12 +249,9 @@ xprt_rdma_connect_worker(struct work_struct *work)
 					   xprt->stat.connect_start;
 		xprt_set_connected(xprt);
 		rc = -EAGAIN;
-	} else {
-		/* Force a call to xprt_rdma_close to clean up */
-		spin_lock(&xprt->transport_lock);
-		set_bit(XPRT_CLOSE_WAIT, &xprt->state);
-		spin_unlock(&xprt->transport_lock);
-	}
+	} else
+		rpcrdma_xprt_disconnect(r_xprt);
+	xprt_unlock_connect(xprt, r_xprt);
 	xprt_wake_pending_tasks(xprt, rc);
 }
 
@@ -262,8 +259,10 @@ xprt_rdma_connect_worker(struct work_struct *work)
  * xprt_rdma_inject_disconnect - inject a connection fault
  * @xprt: transport context
  *
- * If @xprt is connected, disconnect it to simulate spurious connection
- * loss.
+ * If @xprt is connected, disconnect it to simulate spurious
+ * connection loss. Caller must hold @xprt's send lock to
+ * ensure that data structures and hardware resources are
+ * stable during the rdma_disconnect() call.
  */
 static void
 xprt_rdma_inject_disconnect(struct rpc_xprt *xprt)
@@ -485,6 +484,8 @@ xprt_rdma_connect(struct rpc_xprt *xprt, struct rpc_task *task)
 	struct rpcrdma_ep *ep = r_xprt->rx_ep;
 	unsigned long delay;
 
+	WARN_ON_ONCE(!xprt_lock_connect(xprt, task, r_xprt));
+
 	delay = 0;
 	if (ep && ep->re_connect_status != 0) {
 		delay = xprt_reconnect_delay(xprt);
@@ -518,9 +519,8 @@ xprt_rdma_alloc_slot(struct rpc_xprt *xprt, struct rpc_task *task)
 	return;
 
 out_sleep:
-	set_bit(XPRT_CONGESTED, &xprt->state);
-	rpc_sleep_on(&xprt->backlog, task, NULL);
 	task->tk_status = -EAGAIN;
+	xprt_add_backlog(xprt, task);
 }
 
 /**
@@ -535,10 +535,11 @@ xprt_rdma_free_slot(struct rpc_xprt *xprt, struct rpc_rqst *rqst)
 	struct rpcrdma_xprt *r_xprt =
 		container_of(xprt, struct rpcrdma_xprt, rx_xprt);
 
-	memset(rqst, 0, sizeof(*rqst));
-	rpcrdma_buffer_put(&r_xprt->rx_buf, rpcr_to_rdmar(rqst));
-	if (unlikely(!rpc_wake_up_next(&xprt->backlog)))
-		clear_bit(XPRT_CONGESTED, &xprt->state);
+	rpcrdma_reply_put(&r_xprt->rx_buf, rpcr_to_rdmar(rqst));
+	if (!xprt_wake_up_backlog(xprt, rqst)) {
+		memset(rqst, 0, sizeof(*rqst));
+		rpcrdma_buffer_put(&r_xprt->rx_buf, rpcr_to_rdmar(rqst));
+	}
 }
 
 static bool rpcrdma_check_regbuf(struct rpcrdma_xprt *r_xprt,
@@ -768,6 +769,7 @@ static struct xprt_class xprt_rdma = {
 	.owner			= THIS_MODULE,
 	.ident			= XPRT_TRANSPORT_RDMA,
 	.setup			= xprt_setup_rdma,
+	.netid			= { "rdma", "rdma6", "" },
 };
 
 void xprt_rdma_cleanup(void)

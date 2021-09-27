@@ -5,7 +5,7 @@
  *
  * GPL LICENSE SUMMARY
  *
- * Copyright(c) 2018 - 2020 Intel Corporation
+ * Copyright(c) 2018 - 2021 Intel Corporation
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of version 2 of the GNU General Public License as
@@ -126,7 +126,6 @@ int iwl_pcie_ctxt_info_gen3_init(struct iwl_trans *trans,
 	struct iwl_prph_scratch *prph_scratch;
 	struct iwl_prph_scratch_ctrl_cfg *prph_sc_ctrl;
 	struct iwl_prph_info *prph_info;
-	void *iml_img;
 	u32 control_flags = 0;
 	int ret;
 	int cmdq_size = max_t(u32, IWL_CMD_QUEUE_SIZE,
@@ -234,12 +233,15 @@ int iwl_pcie_ctxt_info_gen3_init(struct iwl_trans *trans,
 	trans_pcie->prph_scratch = prph_scratch;
 
 	/* Allocate IML */
-	iml_img = dma_alloc_coherent(trans->dev, trans->iml_len,
-				     &trans_pcie->iml_dma_addr, GFP_KERNEL);
-	if (!iml_img)
-		return -ENOMEM;
+	trans_pcie->iml = dma_alloc_coherent(trans->dev, trans->iml_len,
+					     &trans_pcie->iml_dma_addr,
+					     GFP_KERNEL);
+	if (!trans_pcie->iml) {
+		ret = -ENOMEM;
+		goto err_free_ctxt_info;
+	}
 
-	memcpy(iml_img, trans->iml, trans->iml_len);
+	memcpy(trans_pcie->iml, trans->iml, trans->iml_len);
 
 	iwl_enable_fw_load_int_ctx_info(trans);
 
@@ -253,32 +255,13 @@ int iwl_pcie_ctxt_info_gen3_init(struct iwl_trans *trans,
 	iwl_set_bit(trans, CSR_CTXT_INFO_BOOT_CTRL,
 		    CSR_AUTO_FUNC_BOOT_ENA);
 
-	if (trans->trans_cfg->device_family == IWL_DEVICE_FAMILY_AX210) {
-		/*
-		 * The firmware initializes this again later (to a smaller
-		 * value), but for the boot process initialize the LTR to
-		 * ~250 usec.
-		 */
-		u32 val = CSR_LTR_LONG_VAL_AD_NO_SNOOP_REQ |
-			  u32_encode_bits(CSR_LTR_LONG_VAL_AD_SCALE_USEC,
-					  CSR_LTR_LONG_VAL_AD_NO_SNOOP_SCALE) |
-			  u32_encode_bits(250,
-					  CSR_LTR_LONG_VAL_AD_NO_SNOOP_VAL) |
-			  CSR_LTR_LONG_VAL_AD_SNOOP_REQ |
-			  u32_encode_bits(CSR_LTR_LONG_VAL_AD_SCALE_USEC,
-					  CSR_LTR_LONG_VAL_AD_SNOOP_SCALE) |
-			  u32_encode_bits(250, CSR_LTR_LONG_VAL_AD_SNOOP_VAL);
-
-		iwl_write32(trans, CSR_LTR_LONG_VAL_AD, val);
-	}
-
-	if (trans->trans_cfg->device_family >= IWL_DEVICE_FAMILY_AX210)
-		iwl_write_umac_prph(trans, UREG_CPU_INIT_RUN, 1);
-	else
-		iwl_set_bit(trans, CSR_GP_CNTRL, CSR_AUTO_FUNC_INIT);
-
 	return 0;
 
+err_free_ctxt_info:
+	dma_free_coherent(trans->dev, sizeof(*trans_pcie->ctxt_info_gen3),
+			  trans_pcie->ctxt_info_gen3,
+			  trans_pcie->ctxt_info_dma_addr);
+	trans_pcie->ctxt_info_gen3 = NULL;
 err_free_prph_info:
 	dma_free_coherent(trans->dev,
 			  sizeof(*prph_info),
@@ -307,6 +290,11 @@ void iwl_pcie_ctxt_info_gen3_free(struct iwl_trans *trans)
 	trans_pcie->ctxt_info_dma_addr = 0;
 	trans_pcie->ctxt_info_gen3 = NULL;
 
+	dma_free_coherent(trans->dev, trans->iml_len, trans_pcie->iml,
+			  trans_pcie->iml_dma_addr);
+	trans_pcie->iml_dma_addr = 0;
+	trans_pcie->iml = NULL;
+
 	iwl_pcie_ctxt_info_free_fw_img(trans);
 
 	dma_free_coherent(trans->dev, sizeof(*trans_pcie->prph_scratch),
@@ -333,12 +321,18 @@ int iwl_trans_pcie_ctx_info_gen3_set_pnvm(struct iwl_trans *trans,
 	if (trans->trans_cfg->device_family < IWL_DEVICE_FAMILY_AX210)
 		return 0;
 
-	ret = iwl_pcie_ctxt_info_alloc_dma(trans, data, len,
-					   &trans_pcie->pnvm_dram);
-	if (ret < 0) {
-		IWL_DEBUG_FW(trans, "Failed to allocate PNVM DMA %d.\n",
-			     ret);
-		return ret;
+	/* only allocate the DRAM if not allocated yet */
+	if (!trans->pnvm_loaded) {
+		if (WARN_ON(prph_sc_ctrl->pnvm_cfg.pnvm_size))
+			return -EBUSY;
+
+		ret = iwl_pcie_ctxt_info_alloc_dma(trans, data, len,
+						   &trans_pcie->pnvm_dram);
+		if (ret < 0) {
+			IWL_DEBUG_FW(trans, "Failed to allocate PNVM DMA %d.\n",
+				     ret);
+			return ret;
+		}
 	}
 
 	prph_sc_ctrl->pnvm_cfg.pnvm_base_addr =

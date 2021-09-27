@@ -2897,7 +2897,7 @@ static netdev_tx_t myri10ge_sw_tso(struct sk_buff *skb,
 			dev_kfree_skb_any(curr);
 			if (segs != NULL) {
 				curr = segs;
-				segs = segs->next;
+				segs = next;
 				curr->next = NULL;
 				dev_kfree_skb_any(segs);
 			}
@@ -3815,6 +3815,7 @@ static int myri10ge_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		dev_err(&pdev->dev,
 			"invalid sram_size %dB or board span %ldB\n",
 			mgp->sram_size, mgp->board_span);
+		status = -EINVAL;
 		goto abort_with_ioremap;
 	}
 	memcpy_fromio(mgp->eeprom_strings,

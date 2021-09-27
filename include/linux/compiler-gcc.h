@@ -13,6 +13,12 @@
 /* https://gcc.gnu.org/bugzilla/show_bug.cgi?id=58145 */
 #if GCC_VERSION < 40900
 # error Sorry, your version of GCC is too old - please use 4.9 or newer.
+#elif defined(CONFIG_ARM64) && GCC_VERSION < 50100
+/*
+ * https://gcc.gnu.org/bugzilla/show_bug.cgi?id=63293
+ * https://lore.kernel.org/r/20210107111841.GN1551@shell.armlinux.org.uk
+ */
+# error Sorry, your version of GCC is too old - please use 5.1 or newer.
 #endif
 
 /*
@@ -129,6 +135,12 @@
 #define __no_sanitize_undefined __attribute__((no_sanitize_undefined))
 #else
 #define __no_sanitize_undefined
+#endif
+
+#if defined(CONFIG_KCOV) && __has_attribute(__no_sanitize_coverage__)
+#define __no_sanitize_coverage __attribute__((no_sanitize_coverage))
+#else
+#define __no_sanitize_coverage
 #endif
 
 #if GCC_VERSION >= 50100

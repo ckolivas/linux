@@ -118,17 +118,24 @@ static bool __mlx5_lag_is_sriov(struct mlx5_lag *ldev)
 static void mlx5_infer_tx_affinity_mapping(struct lag_tracker *tracker,
 					   u8 *port1, u8 *port2)
 {
+	bool p1en;
+	bool p2en;
+
+	p1en = tracker->netdev_state[MLX5_LAG_P1].tx_enabled &&
+	       tracker->netdev_state[MLX5_LAG_P1].link_up;
+
+	p2en = tracker->netdev_state[MLX5_LAG_P2].tx_enabled &&
+	       tracker->netdev_state[MLX5_LAG_P2].link_up;
+
 	*port1 = 1;
 	*port2 = 2;
-	if (!tracker->netdev_state[MLX5_LAG_P1].tx_enabled ||
-	    !tracker->netdev_state[MLX5_LAG_P1].link_up) {
-		*port1 = 2;
+	if ((!p1en && !p2en) || (p1en && p2en))
 		return;
-	}
 
-	if (!tracker->netdev_state[MLX5_LAG_P2].tx_enabled ||
-	    !tracker->netdev_state[MLX5_LAG_P2].link_up)
+	if (p1en)
 		*port2 = 1;
+	else
+		*port1 = 2;
 }
 
 void mlx5_modify_lag(struct mlx5_lag *ldev,
@@ -556,7 +563,9 @@ void mlx5_lag_add(struct mlx5_core_dev *dev, struct net_device *netdev)
 	struct mlx5_core_dev *tmp_dev;
 	int i, err;
 
-	if (!MLX5_CAP_GEN(dev, vport_group_manager))
+	if (!MLX5_CAP_GEN(dev, vport_group_manager) ||
+	    !MLX5_CAP_GEN(dev, lag_master) ||
+	    MLX5_CAP_GEN(dev, num_lag_ports) != MLX5_MAX_PORTS)
 		return;
 
 	tmp_dev = mlx5_get_next_phys_dev(dev);
@@ -574,12 +583,9 @@ void mlx5_lag_add(struct mlx5_core_dev *dev, struct net_device *netdev)
 	if (mlx5_lag_dev_add_pf(ldev, dev, netdev) < 0)
 		return;
 
-	for (i = 0; i < MLX5_MAX_PORTS; i++) {
-		tmp_dev = ldev->pf[i].dev;
-		if (!tmp_dev || !MLX5_CAP_GEN(tmp_dev, lag_master) ||
-		    MLX5_CAP_GEN(tmp_dev, num_lag_ports) != MLX5_MAX_PORTS)
+	for (i = 0; i < MLX5_MAX_PORTS; i++)
+		if (!ldev->pf[i].dev)
 			break;
-	}
 
 	if (i >= MLX5_MAX_PORTS)
 		ldev->flags |= MLX5_LAG_FLAG_READY;

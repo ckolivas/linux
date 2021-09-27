@@ -258,6 +258,11 @@ static struct btf_id *add_symbol(struct rb_root *root, char *name, size_t size)
 	return btf_id__add(root, id, false);
 }
 
+/* Older libelf.h and glibc elf.h might not yet define the ELF compression types. */
+#ifndef SHF_COMPRESSED
+#define SHF_COMPRESSED (1 << 11) /* Section with compressed data. */
+#endif
+
 /*
  * The data of compressed section should be aligned to 4
  * (for 32bit) or 8 (for 64 bit) bytes. The binutils ld
@@ -643,6 +648,9 @@ static int symbols_patch(struct object *obj)
 
 	if (sets_patch(obj))
 		return -1;
+
+	/* Set type to ensure endian translation occurs. */
+	obj->efile.idlist->d_type = ELF_T_WORD;
 
 	elf_flagdata(obj->efile.idlist, ELF_C_SET, ELF_F_DIRTY);
 

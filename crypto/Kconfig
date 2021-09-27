@@ -145,7 +145,7 @@ config CRYPTO_MANAGER_DISABLE_TESTS
 
 config CRYPTO_MANAGER_EXTRA_TESTS
 	bool "Enable extra run-time crypto self tests"
-	depends on DEBUG_KERNEL && !CRYPTO_MANAGER_DISABLE_TESTS
+	depends on DEBUG_KERNEL && !CRYPTO_MANAGER_DISABLE_TESTS && CRYPTO_MANAGER
 	help
 	  Enable extra run-time self tests of registered crypto algorithms,
 	  including randomized fuzz tests.
@@ -772,7 +772,7 @@ config CRYPTO_POLY1305_X86_64
 
 config CRYPTO_POLY1305_MIPS
 	tristate "Poly1305 authenticator algorithm (MIPS optimized)"
-	depends on CPU_MIPS32 || (CPU_MIPS64 && 64BIT)
+	depends on MIPS
 	select CRYPTO_ARCH_HAVE_LIB_POLY1305
 
 config CRYPTO_MD4

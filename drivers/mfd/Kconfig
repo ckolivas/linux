@@ -465,6 +465,7 @@ config MFD_MP2629
 	tristate "Monolithic Power Systems MP2629 ADC and Battery charger"
 	depends on I2C
 	select REGMAP_I2C
+	select MFD_CORE
 	help
 	  Select this option to enable support for Monolithic Power Systems
 	  battery charger. This provides ADC, thermal and battery charger power
@@ -1189,6 +1190,7 @@ config MFD_SIMPLE_MFD_I2C
 config MFD_SL28CPLD
 	tristate "Kontron sl28cpld Board Management Controller"
 	depends on I2C
+	depends on ARCH_LAYERSCAPE || COMPILE_TEST
 	select MFD_SIMPLE_MFD_I2C
 	help
 	  Say yes here to enable support for the Kontron sl28cpld board

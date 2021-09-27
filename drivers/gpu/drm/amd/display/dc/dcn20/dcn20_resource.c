@@ -297,8 +297,8 @@ static struct _vcs_dpi_soc_bounding_box_st dcn2_0_soc = {
 			},
 		},
 	.num_states = 5,
-	.sr_exit_time_us = 11.6,
-	.sr_enter_plus_exit_time_us = 13.9,
+	.sr_exit_time_us = 8.6,
+	.sr_enter_plus_exit_time_us = 10.9,
 	.urgent_latency_us = 4.0,
 	.urgent_latency_pixel_data_only_us = 4.0,
 	.urgent_latency_pixel_mixed_with_vm_data_us = 4.0,
@@ -408,8 +408,8 @@ static struct _vcs_dpi_soc_bounding_box_st dcn2_0_nv14_soc = {
 			},
 		},
 	.num_states = 5,
-	.sr_exit_time_us = 11.6,
-	.sr_enter_plus_exit_time_us = 13.9,
+	.sr_exit_time_us = 8.6,
+	.sr_enter_plus_exit_time_us = 10.9,
 	.urgent_latency_us = 4.0,
 	.urgent_latency_pixel_data_only_us = 4.0,
 	.urgent_latency_pixel_mixed_with_vm_data_us = 4.0,
@@ -1104,7 +1104,7 @@ struct dpp *dcn20_dpp_create(
 	uint32_t inst)
 {
 	struct dcn20_dpp *dpp =
-		kzalloc(sizeof(struct dcn20_dpp), GFP_KERNEL);
+		kzalloc(sizeof(struct dcn20_dpp), GFP_ATOMIC);
 
 	if (!dpp)
 		return NULL;
@@ -1122,7 +1122,7 @@ struct input_pixel_processor *dcn20_ipp_create(
 	struct dc_context *ctx, uint32_t inst)
 {
 	struct dcn10_ipp *ipp =
-		kzalloc(sizeof(struct dcn10_ipp), GFP_KERNEL);
+		kzalloc(sizeof(struct dcn10_ipp), GFP_ATOMIC);
 
 	if (!ipp) {
 		BREAK_TO_DEBUGGER();
@@ -1139,7 +1139,7 @@ struct output_pixel_processor *dcn20_opp_create(
 	struct dc_context *ctx, uint32_t inst)
 {
 	struct dcn20_opp *opp =
-		kzalloc(sizeof(struct dcn20_opp), GFP_KERNEL);
+		kzalloc(sizeof(struct dcn20_opp), GFP_ATOMIC);
 
 	if (!opp) {
 		BREAK_TO_DEBUGGER();
@@ -1156,7 +1156,7 @@ struct dce_aux *dcn20_aux_engine_create(
 	uint32_t inst)
 {
 	struct aux_engine_dce110 *aux_engine =
-		kzalloc(sizeof(struct aux_engine_dce110), GFP_KERNEL);
+		kzalloc(sizeof(struct aux_engine_dce110), GFP_ATOMIC);
 
 	if (!aux_engine)
 		return NULL;
@@ -1194,7 +1194,7 @@ struct dce_i2c_hw *dcn20_i2c_hw_create(
 	uint32_t inst)
 {
 	struct dce_i2c_hw *dce_i2c_hw =
-		kzalloc(sizeof(struct dce_i2c_hw), GFP_KERNEL);
+		kzalloc(sizeof(struct dce_i2c_hw), GFP_ATOMIC);
 
 	if (!dce_i2c_hw)
 		return NULL;
@@ -1207,7 +1207,7 @@ struct dce_i2c_hw *dcn20_i2c_hw_create(
 struct mpc *dcn20_mpc_create(struct dc_context *ctx)
 {
 	struct dcn20_mpc *mpc20 = kzalloc(sizeof(struct dcn20_mpc),
-					  GFP_KERNEL);
+					  GFP_ATOMIC);
 
 	if (!mpc20)
 		return NULL;
@@ -1225,7 +1225,7 @@ struct hubbub *dcn20_hubbub_create(struct dc_context *ctx)
 {
 	int i;
 	struct dcn20_hubbub *hubbub = kzalloc(sizeof(struct dcn20_hubbub),
-					  GFP_KERNEL);
+					  GFP_ATOMIC);
 
 	if (!hubbub)
 		return NULL;
@@ -1253,7 +1253,7 @@ struct timing_generator *dcn20_timing_generator_create(
 		uint32_t instance)
 {
 	struct optc *tgn10 =
-		kzalloc(sizeof(struct optc), GFP_KERNEL);
+		kzalloc(sizeof(struct optc), GFP_ATOMIC);
 
 	if (!tgn10)
 		return NULL;
@@ -1332,7 +1332,7 @@ static struct clock_source *dcn20_clock_source_create(
 	bool dp_clk_src)
 {
 	struct dce110_clk_src *clk_src =
-		kzalloc(sizeof(struct dce110_clk_src), GFP_KERNEL);
+		kzalloc(sizeof(struct dce110_clk_src), GFP_ATOMIC);
 
 	if (!clk_src)
 		return NULL;
@@ -1438,7 +1438,7 @@ struct display_stream_compressor *dcn20_dsc_create(
 	struct dc_context *ctx, uint32_t inst)
 {
 	struct dcn20_dsc *dsc =
-		kzalloc(sizeof(struct dcn20_dsc), GFP_KERNEL);
+		kzalloc(sizeof(struct dcn20_dsc), GFP_ATOMIC);
 
 	if (!dsc) {
 		BREAK_TO_DEBUGGER();
@@ -1572,7 +1572,7 @@ struct hubp *dcn20_hubp_create(
 	uint32_t inst)
 {
 	struct dcn20_hubp *hubp2 =
-		kzalloc(sizeof(struct dcn20_hubp), GFP_KERNEL);
+		kzalloc(sizeof(struct dcn20_hubp), GFP_ATOMIC);
 
 	if (!hubp2)
 		return NULL;
@@ -2077,8 +2077,10 @@ int dcn20_populate_dml_pipes_from_context(
 				- timing->v_border_bottom;
 		pipes[pipe_cnt].pipe.dest.htotal = timing->h_total;
 		pipes[pipe_cnt].pipe.dest.vtotal = v_total;
-		pipes[pipe_cnt].pipe.dest.hactive = timing->h_addressable;
-		pipes[pipe_cnt].pipe.dest.vactive = timing->v_addressable;
+		pipes[pipe_cnt].pipe.dest.hactive =
+			timing->h_addressable + timing->h_border_left + timing->h_border_right;
+		pipes[pipe_cnt].pipe.dest.vactive =
+			timing->v_addressable + timing->v_border_top + timing->v_border_bottom;
 		pipes[pipe_cnt].pipe.dest.interlaced = timing->flags.INTERLACE;
 		pipes[pipe_cnt].pipe.dest.pixel_rate_mhz = timing->pix_clk_100hz/10000.0;
 		if (timing->timing_3d_format == TIMING_3D_FORMAT_HW_FRAME_PACKING)
@@ -2453,7 +2455,7 @@ void dcn20_set_mcif_arb_params(
 				wb_arb_params->cli_watermark[k] = get_wm_writeback_urgent(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
 				wb_arb_params->pstate_watermark[k] = get_wm_writeback_dram_clock_change(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
 			}
-			wb_arb_params->time_per_pixel = 16.0 / context->res_ctx.pipe_ctx[i].stream->phy_pix_clk; /* 4 bit fraction, ms */
+			wb_arb_params->time_per_pixel = 16.0 * 1000 / (context->res_ctx.pipe_ctx[i].stream->phy_pix_clk / 1000); /* 4 bit fraction, ms */
 			wb_arb_params->slice_lines = 32;
 			wb_arb_params->arbitration_slice = 2;
 			wb_arb_params->max_scaled_time = dcn20_calc_max_scaled_time(wb_arb_params->time_per_pixel,
@@ -2520,8 +2522,7 @@ struct pipe_ctx *dcn20_find_secondary_pipe(struct dc *dc,
 		 * if this primary pipe has a bottom pipe in prev. state
 		 * and if the bottom pipe is still available (which it should be),
 		 * pick that pipe as secondary
-		 * Same logic applies for ODM pipes. Since mpo is not allowed with odm
-		 * check in else case.
+		 * Same logic applies for ODM pipes
 		 */
 		if (dc->current_state->res_ctx.pipe_ctx[primary_pipe->pipe_idx].bottom_pipe) {
 			preferred_pipe_idx = dc->current_state->res_ctx.pipe_ctx[primary_pipe->pipe_idx].bottom_pipe->pipe_idx;
@@ -2529,7 +2530,9 @@ struct pipe_ctx *dcn20_find_secondary_pipe(struct dc *dc,
 				secondary_pipe = &res_ctx->pipe_ctx[preferred_pipe_idx];
 				secondary_pipe->pipe_idx = preferred_pipe_idx;
 			}
-		} else if (dc->current_state->res_ctx.pipe_ctx[primary_pipe->pipe_idx].next_odm_pipe) {
+		}
+		if (secondary_pipe == NULL &&
+				dc->current_state->res_ctx.pipe_ctx[primary_pipe->pipe_idx].next_odm_pipe) {
 			preferred_pipe_idx = dc->current_state->res_ctx.pipe_ctx[primary_pipe->pipe_idx].next_odm_pipe->pipe_idx;
 			if (res_ctx->pipe_ctx[preferred_pipe_idx].stream == NULL) {
 				secondary_pipe = &res_ctx->pipe_ctx[preferred_pipe_idx];
@@ -3231,7 +3234,7 @@ static noinline bool dcn20_validate_bandwidth_fp(struct dc *dc,
 	voltage_supported = dcn20_validate_bandwidth_internal(dc, context, false);
 	dummy_pstate_supported = context->bw_ctx.bw.dcn.clk.p_state_change_support;
 
-	if (voltage_supported && dummy_pstate_supported) {
+	if (voltage_supported && (dummy_pstate_supported || !(context->stream_count))) {
 		context->bw_ctx.bw.dcn.clk.p_state_change_support = false;
 		goto restore_dml_state;
 	}
@@ -3247,7 +3250,7 @@ restore_dml_state:
 bool dcn20_validate_bandwidth(struct dc *dc, struct dc_state *context,
 		bool fast_validate)
 {
-	bool voltage_supported = false;
+	bool voltage_supported;
 	DC_FP_START();
 	voltage_supported = dcn20_validate_bandwidth_fp(dc, context, fast_validate);
 	DC_FP_END();
@@ -3390,7 +3393,7 @@ bool dcn20_mmhubbub_create(struct dc_context *ctx, struct resource_pool *pool)
 
 static struct pp_smu_funcs *dcn20_pp_smu_create(struct dc_context *ctx)
 {
-	struct pp_smu_funcs *pp_smu = kzalloc(sizeof(*pp_smu), GFP_KERNEL);
+	struct pp_smu_funcs *pp_smu = kzalloc(sizeof(*pp_smu), GFP_ATOMIC);
 
 	if (!pp_smu)
 		return pp_smu;
@@ -4141,7 +4144,7 @@ struct resource_pool *dcn20_create_resource_pool(
 		struct dc *dc)
 {
 	struct dcn20_resource_pool *pool =
-		kzalloc(sizeof(struct dcn20_resource_pool), GFP_KERNEL);
+		kzalloc(sizeof(struct dcn20_resource_pool), GFP_ATOMIC);
 
 	if (!pool)
 		return NULL;

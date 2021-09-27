@@ -243,8 +243,8 @@ struct ceph_mdsmap *ceph_mdsmap_decode(void **p, void *end)
 		}
 
 		if (state <= 0) {
-			pr_warn("mdsmap_decode got incorrect state(%s)\n",
-				ceph_mds_state_name(state));
+			dout("mdsmap_decode got incorrect state(%s)\n",
+			     ceph_mds_state_name(state));
 			continue;
 		}
 
@@ -393,9 +393,11 @@ void ceph_mdsmap_destroy(struct ceph_mdsmap *m)
 {
 	int i;
 
-	for (i = 0; i < m->possible_max_rank; i++)
-		kfree(m->m_info[i].export_targets);
-	kfree(m->m_info);
+	if (m->m_info) {
+		for (i = 0; i < m->possible_max_rank; i++)
+			kfree(m->m_info[i].export_targets);
+		kfree(m->m_info);
+	}
 	kfree(m->m_data_pg_pools);
 	kfree(m);
 }

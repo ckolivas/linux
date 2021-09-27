@@ -253,11 +253,16 @@ static int ufs_qcom_host_reset(struct ufs_hba *hba)
 {
 	int ret = 0;
 	struct ufs_qcom_host *host = ufshcd_get_variant(hba);
+	bool reenable_intr = false;
 
 	if (!host->core_reset) {
 		dev_warn(hba->dev, "%s: reset control not set\n", __func__);
 		goto out;
 	}
+
+	reenable_intr = hba->is_irq_enabled;
+	disable_irq(hba->irq);
+	hba->is_irq_enabled = false;
 
 	ret = reset_control_assert(host->core_reset);
 	if (ret) {
@@ -279,6 +284,11 @@ static int ufs_qcom_host_reset(struct ufs_hba *hba)
 				 __func__, ret);
 
 	usleep_range(1000, 1100);
+
+	if (reenable_intr) {
+		enable_irq(hba->irq);
+		hba->is_irq_enabled = true;
+	}
 
 out:
 	return ret;
@@ -1421,13 +1431,13 @@ static void ufs_qcom_dump_dbg_regs(struct ufs_hba *hba)
  *
  * Toggles the (optional) reset line to reset the attached device.
  */
-static void ufs_qcom_device_reset(struct ufs_hba *hba)
+static int ufs_qcom_device_reset(struct ufs_hba *hba)
 {
 	struct ufs_qcom_host *host = ufshcd_get_variant(hba);
 
 	/* reset gpio is optional */
 	if (!host->device_reset)
-		return;
+		return -EOPNOTSUPP;
 
 	/*
 	 * The UFS device shall detect reset pulses of 1us, sleep for 10us to
@@ -1438,6 +1448,8 @@ static void ufs_qcom_device_reset(struct ufs_hba *hba)
 
 	gpiod_set_value_cansleep(host->device_reset, 0);
 	usleep_range(10, 15);
+
+	return 0;
 }
 
 #if IS_ENABLED(CONFIG_DEVFREQ_GOV_SIMPLE_ONDEMAND)

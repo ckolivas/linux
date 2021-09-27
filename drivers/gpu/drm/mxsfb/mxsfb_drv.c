@@ -51,6 +51,7 @@ static const struct mxsfb_devdata mxsfb_devdata[] = {
 		.hs_wdth_mask	= 0xff,
 		.hs_wdth_shift	= 24,
 		.has_overlay	= false,
+		.has_ctrl2	= false,
 	},
 	[MXSFB_V4] = {
 		.transfer_count	= LCDC_V4_TRANSFER_COUNT,
@@ -59,6 +60,7 @@ static const struct mxsfb_devdata mxsfb_devdata[] = {
 		.hs_wdth_mask	= 0x3fff,
 		.hs_wdth_shift	= 18,
 		.has_overlay	= false,
+		.has_ctrl2	= true,
 	},
 	[MXSFB_V6] = {
 		.transfer_count	= LCDC_V4_TRANSFER_COUNT,
@@ -67,6 +69,7 @@ static const struct mxsfb_devdata mxsfb_devdata[] = {
 		.hs_wdth_mask	= 0x3fff,
 		.hs_wdth_shift	= 18,
 		.has_overlay	= true,
+		.has_ctrl2	= true,
 	},
 };
 
@@ -134,11 +137,8 @@ static int mxsfb_attach_bridge(struct mxsfb_drm_private *mxsfb)
 		return -ENODEV;
 
 	ret = drm_bridge_attach(&mxsfb->encoder, bridge, NULL, 0);
-	if (ret) {
-		DRM_DEV_ERROR(drm->dev,
-			      "failed to attach bridge: %d\n", ret);
-		return ret;
-	}
+	if (ret)
+		return dev_err_probe(drm->dev, ret, "Failed to attach bridge\n");
 
 	mxsfb->bridge = bridge;
 
@@ -212,7 +212,8 @@ static int mxsfb_load(struct drm_device *drm,
 
 	ret = mxsfb_attach_bridge(mxsfb);
 	if (ret) {
-		dev_err(drm->dev, "Cannot connect bridge: %d\n", ret);
+		if (ret != -EPROBE_DEFER)
+			dev_err(drm->dev, "Cannot connect bridge: %d\n", ret);
 		goto err_vblank;
 	}
 

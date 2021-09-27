@@ -129,9 +129,11 @@ static inline bool xp_aligned_validate_desc(struct xsk_buff_pool *pool,
 	u64 chunk, chunk_end;
 
 	chunk = xp_aligned_extract_addr(pool, desc->addr);
-	chunk_end = xp_aligned_extract_addr(pool, desc->addr + desc->len);
-	if (chunk != chunk_end)
-		return false;
+	if (likely(desc->len)) {
+		chunk_end = xp_aligned_extract_addr(pool, desc->addr + desc->len - 1);
+		if (chunk != chunk_end)
+			return false;
+	}
 
 	if (chunk >= pool->addrs_cnt)
 		return false;
@@ -284,6 +286,11 @@ static inline bool xskq_prod_is_full(struct xsk_queue *q)
 	free_entries = q->nentries - (q->cached_prod - q->cached_cons);
 
 	return !free_entries;
+}
+
+static inline void xskq_prod_cancel(struct xsk_queue *q)
+{
+	q->cached_prod--;
 }
 
 static inline int xskq_prod_reserve(struct xsk_queue *q)

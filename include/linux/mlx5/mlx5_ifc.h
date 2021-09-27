@@ -435,11 +435,11 @@ struct mlx5_ifc_flow_table_prop_layout_bits {
 	u8         reserved_at_60[0x18];
 	u8         log_max_ft_num[0x8];
 
-	u8         reserved_at_80[0x18];
+	u8         reserved_at_80[0x10];
+	u8         log_max_flow_counter[0x8];
 	u8         log_max_destination[0x8];
 
-	u8         log_max_flow_counter[0x8];
-	u8         reserved_at_a8[0x10];
+	u8         reserved_at_a0[0x18];
 	u8         log_max_flow[0x8];
 
 	u8         reserved_at_c0[0x40];
@@ -876,7 +876,8 @@ struct mlx5_ifc_per_protocol_networking_offload_caps_bits {
 	u8         scatter_fcs[0x1];
 	u8         enhanced_multi_pkt_send_wqe[0x1];
 	u8         tunnel_lso_const_out_ip_id[0x1];
-	u8         reserved_at_1c[0x2];
+	u8         tunnel_lro_gre[0x1];
+	u8         tunnel_lro_vxlan[0x1];
 	u8         tunnel_stateless_gre[0x1];
 	u8         tunnel_stateless_vxlan[0x1];
 
@@ -1222,6 +1223,8 @@ enum mlx5_fc_bulk_alloc_bitmask {
 };
 
 #define MLX5_FC_BULK_NUM_FCS(fc_enum) (MLX5_FC_BULK_SIZE_FACTOR * (fc_enum))
+
+#define MLX5_FT_MAX_MULTIPATH_LEVEL 63
 
 enum {
 	MLX5_STEERING_FORMAT_CONNECTX_5   = 0,
@@ -8719,6 +8722,8 @@ struct mlx5_ifc_pplm_reg_bits {
 
 	u8         fec_override_admin_100g_2x[0x10];
 	u8         fec_override_admin_50g_1x[0x10];
+
+	u8         reserved_at_140[0x140];
 };
 
 struct mlx5_ifc_ppcnt_reg_bits {
@@ -10056,7 +10061,7 @@ struct mlx5_ifc_pbmc_reg_bits {
 
 	struct mlx5_ifc_bufferx_reg_bits buffer[10];
 
-	u8         reserved_at_2e0[0x40];
+	u8         reserved_at_2e0[0x80];
 };
 
 struct mlx5_ifc_qtct_reg_bits {

@@ -60,7 +60,8 @@ static int panfrost_clk_init(struct panfrost_device *pfdev)
 	if (IS_ERR(pfdev->bus_clock)) {
 		dev_err(pfdev->dev, "get bus_clock failed %ld\n",
 			PTR_ERR(pfdev->bus_clock));
-		return PTR_ERR(pfdev->bus_clock);
+		err = PTR_ERR(pfdev->bus_clock);
+		goto disable_clock;
 	}
 
 	if (pfdev->bus_clock) {
@@ -206,7 +207,6 @@ int panfrost_device_init(struct panfrost_device *pfdev)
 	struct resource *res;
 
 	mutex_init(&pfdev->sched_lock);
-	mutex_init(&pfdev->reset_lock);
 	INIT_LIST_HEAD(&pfdev->scheduled_jobs);
 	INIT_LIST_HEAD(&pfdev->as_lru_list);
 

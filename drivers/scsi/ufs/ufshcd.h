@@ -318,7 +318,7 @@ struct ufs_hba_variant_ops {
 	int     (*resume)(struct ufs_hba *, enum ufs_pm_op);
 	void	(*dbg_register_dump)(struct ufs_hba *hba);
 	int	(*phy_initialization)(struct ufs_hba *);
-	void	(*device_reset)(struct ufs_hba *hba);
+	int	(*device_reset)(struct ufs_hba *hba);
 	void	(*config_scaling_param)(struct ufs_hba *hba,
 					struct devfreq_dev_profile *profile,
 					void *data);
@@ -544,6 +544,16 @@ enum ufshcd_quirks {
 	 */
 	UFSHCI_QUIRK_SKIP_MANUAL_WB_FLUSH_CTRL		= 1 << 12,
 
+	/*
+	 * This quirk needs to disable unipro timeout values
+	 * before power mode change
+	 */
+	UFSHCD_QUIRK_SKIP_DEF_UNIPRO_TIMEOUT_SETTING = 1 << 13,
+
+	/*
+	 * This quirk allows only sg entries aligned with page size.
+	 */
+	UFSHCD_QUIRK_ALIGN_SG_WITH_PAGE_SIZE		= 1 << 14,
 };
 
 enum ufshcd_caps {
@@ -683,6 +693,7 @@ struct ufs_hba {
 	 * "UFS device" W-LU.
 	 */
 	struct scsi_device *sdev_ufs_device;
+	struct scsi_device *sdev_rpmb;
 
 	enum ufs_dev_pwr_mode curr_dev_pwr_mode;
 	enum uic_link_state uic_link_state;
@@ -1181,9 +1192,17 @@ static inline void ufshcd_vops_dbg_register_dump(struct ufs_hba *hba)
 static inline void ufshcd_vops_device_reset(struct ufs_hba *hba)
 {
 	if (hba->vops && hba->vops->device_reset) {
-		hba->vops->device_reset(hba);
-		ufshcd_set_ufs_dev_active(hba);
-		ufshcd_update_reg_hist(&hba->ufs_stats.dev_reset, 0);
+		int err = hba->vops->device_reset(hba);
+
+		if (!err) {
+			ufshcd_set_ufs_dev_active(hba);
+			if (ufshcd_is_wb_allowed(hba)) {
+				hba->wb_enabled = false;
+				hba->wb_buf_flush_enabled = false;
+			}
+		}
+		if (err != -EOPNOTSUPP)
+			ufshcd_update_reg_hist(&hba->ufs_stats.dev_reset, err);
 	}
 }
 

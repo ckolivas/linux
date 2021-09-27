@@ -2195,6 +2195,9 @@ static int ext4_add_entry(handle_t *handle, struct dentry *dentry,
 	if (!dentry->d_name.len)
 		return -EINVAL;
 
+	if (fscrypt_is_nokey_name(dentry))
+		return -ENOKEY;
+
 #ifdef CONFIG_UNICODE
 	if (sb_has_strict_encoding(sb) && IS_CASEFOLDED(dir) &&
 	    sb->s_encoding && utf8_validate(sb->s_encoding, &dentry->d_name))
@@ -2407,11 +2410,10 @@ again:
 						   (frame - 1)->bh);
 			if (err)
 				goto journal_error;
-			if (restart) {
-				err = ext4_handle_dirty_dx_node(handle, dir,
-							   frame->bh);
+			err = ext4_handle_dirty_dx_node(handle, dir,
+							frame->bh);
+			if (restart || err)
 				goto journal_error;
-			}
 		} else {
 			struct dx_root *dxroot;
 			memcpy((char *) entries2, (char *) entries,
@@ -3599,10 +3601,32 @@ static int ext4_setent(handle_t *handle, struct ext4_renament *ent,
 			return retval2;
 		}
 	}
-	brelse(ent->bh);
-	ent->bh = NULL;
-
 	return retval;
+}
+
+static void ext4_resetent(handle_t *handle, struct ext4_renament *ent,
+			  unsigned ino, unsigned file_type)
+{
+	struct ext4_renament old = *ent;
+	int retval = 0;
+
+	/*
+	 * old->de could have moved from under us during make indexed dir,
+	 * so the old->de may no longer valid and need to find it again
+	 * before reset old inode info.
+	 */
+	old.bh = ext4_find_entry(old.dir, &old.dentry->d_name, &old.de, NULL);
+	if (IS_ERR(old.bh))
+		retval = PTR_ERR(old.bh);
+	if (!old.bh)
+		retval = -ENOENT;
+	if (retval) {
+		ext4_std_error(old.dir->i_sb, retval);
+		return;
+	}
+
+	ext4_setent(handle, &old, ino, file_type);
+	brelse(old.bh);
 }
 
 static int ext4_find_delete_entry(handle_t *handle, struct inode *dir,
@@ -3764,14 +3788,14 @@ static int ext4_rename(struct inode *old_dir, struct dentry *old_dentry,
 	 */
 	retval = -ENOENT;
 	if (!old.bh || le32_to_cpu(old.de->inode) != old.inode->i_ino)
-		goto end_rename;
+		goto release_bh;
 
 	new.bh = ext4_find_entry(new.dir, &new.dentry->d_name,
 				 &new.de, &new.inlined);
 	if (IS_ERR(new.bh)) {
 		retval = PTR_ERR(new.bh);
 		new.bh = NULL;
-		goto end_rename;
+		goto release_bh;
 	}
 	if (new.bh) {
 		if (!new.inode) {
@@ -3788,18 +3812,17 @@ static int ext4_rename(struct inode *old_dir, struct dentry *old_dentry,
 		handle = ext4_journal_start(old.dir, EXT4_HT_DIR, credits);
 		if (IS_ERR(handle)) {
 			retval = PTR_ERR(handle);
-			handle = NULL;
-			goto end_rename;
+			goto release_bh;
 		}
 	} else {
 		whiteout = ext4_whiteout_for_rename(&old, credits, &handle);
 		if (IS_ERR(whiteout)) {
 			retval = PTR_ERR(whiteout);
-			whiteout = NULL;
-			goto end_rename;
+			goto release_bh;
 		}
 	}
 
+	old_file_type = old.de->file_type;
 	if (IS_DIRSYNC(old.dir) || IS_DIRSYNC(new.dir))
 		ext4_handle_sync(handle);
 
@@ -3827,7 +3850,6 @@ static int ext4_rename(struct inode *old_dir, struct dentry *old_dentry,
 	force_reread = (new.dir->i_ino == old.dir->i_ino &&
 			ext4_test_inode_flag(new.dir, EXT4_INODE_INLINE_DATA));
 
-	old_file_type = old.de->file_type;
 	if (whiteout) {
 		/*
 		 * Do this before adding a new entry, so the old entry is sure
@@ -3840,6 +3862,7 @@ static int ext4_rename(struct inode *old_dir, struct dentry *old_dentry,
 		retval = ext4_mark_inode_dirty(handle, whiteout);
 		if (unlikely(retval))
 			goto end_rename;
+
 	}
 	if (!new.bh) {
 		retval = ext4_add_entry(handle, new.dentry, old.inode);
@@ -3913,6 +3936,8 @@ static int ext4_rename(struct inode *old_dir, struct dentry *old_dentry,
 			ext4_fc_track_unlink(handle, new.dentry);
 		__ext4_fc_track_link(handle, old.inode, new.dentry);
 		__ext4_fc_track_unlink(handle, old.inode, old.dentry);
+		if (whiteout)
+			__ext4_fc_track_create(handle, whiteout, old.dentry);
 	}
 
 	if (new.inode) {
@@ -3925,17 +3950,23 @@ static int ext4_rename(struct inode *old_dir, struct dentry *old_dentry,
 	retval = 0;
 
 end_rename:
+	if (whiteout) {
+		if (retval) {
+			ext4_resetent(handle, &old,
+				      old.inode->i_ino, old_file_type);
+			drop_nlink(whiteout);
+			ext4_orphan_add(handle, whiteout);
+		}
+		unlock_new_inode(whiteout);
+		ext4_journal_stop(handle);
+		iput(whiteout);
+	} else {
+		ext4_journal_stop(handle);
+	}
+release_bh:
 	brelse(old.dir_bh);
 	brelse(old.bh);
 	brelse(new.bh);
-	if (whiteout) {
-		if (retval)
-			drop_nlink(whiteout);
-		unlock_new_inode(whiteout);
-		iput(whiteout);
-	}
-	if (handle)
-		ext4_journal_stop(handle);
 	return retval;
 }
 

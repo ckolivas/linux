@@ -135,14 +135,32 @@ static void hv_machine_shutdown(void)
 {
 	if (kexec_in_progress && hv_kexec_handler)
 		hv_kexec_handler();
+
+	/*
+	 * Call hv_cpu_die() on all the CPUs, otherwise later the hypervisor
+	 * corrupts the old VP Assist Pages and can crash the kexec kernel.
+	 */
+	if (kexec_in_progress && hyperv_init_cpuhp > 0)
+		cpuhp_remove_state(hyperv_init_cpuhp);
+
+	/* The function calls stop_other_cpus(). */
 	native_machine_shutdown();
+
+	/* Disable the hypercall page when there is only 1 active CPU. */
+	if (kexec_in_progress)
+		hyperv_cleanup();
 }
 
 static void hv_machine_crash_shutdown(struct pt_regs *regs)
 {
 	if (hv_crash_handler)
 		hv_crash_handler(regs);
+
+	/* The function calls crash_smp_send_stop(). */
 	native_machine_crash_shutdown(regs);
+
+	/* Disable the hypercall page when there is only 1 active CPU. */
+	hyperv_cleanup();
 }
 #endif /* CONFIG_KEXEC_CORE */
 #endif /* CONFIG_HYPERV */
@@ -304,8 +322,6 @@ static void __init ms_hyperv_init_platform(void)
 	if (ms_hyperv.features & HV_ACCESS_TSC_INVARIANT) {
 		wrmsrl(HV_X64_MSR_TSC_INVARIANT_CONTROL, 0x1);
 		setup_force_cpu_cap(X86_FEATURE_TSC_RELIABLE);
-	} else {
-		mark_tsc_unstable("running on Hyper-V");
 	}
 
 	/*
@@ -364,6 +380,13 @@ static void __init ms_hyperv_init_platform(void)
 	/* Register Hyper-V specific clocksource */
 	hv_init_clocksource();
 #endif
+	/*
+	 * TSC should be marked as unstable only after Hyper-V
+	 * clocksource has been initialized. This ensures that the
+	 * stability of the sched_clock is not altered.
+	 */
+	if (!(ms_hyperv.features & HV_ACCESS_TSC_INVARIANT))
+		mark_tsc_unstable("running on Hyper-V");
 }
 
 const __initconst struct hypervisor_x86 x86_hyper_ms_hyperv = {

@@ -274,7 +274,7 @@ static int do_batch(int argc, char **argv)
 	int n_argc;
 	FILE *fp;
 	char *cp;
-	int err;
+	int err = 0;
 	int i;
 
 	if (argc < 2) {
@@ -338,8 +338,10 @@ static int do_batch(int argc, char **argv)
 		n_argc = make_args(buf, n_argv, BATCH_ARG_NB_MAX, lines);
 		if (!n_argc)
 			continue;
-		if (n_argc < 0)
+		if (n_argc < 0) {
+			err = n_argc;
 			goto err_close;
+		}
 
 		if (json_output) {
 			jsonw_start_object(json_wtr);
@@ -368,7 +370,6 @@ static int do_batch(int argc, char **argv)
 	} else {
 		if (!json_output)
 			printf("processed %d commands\n", lines);
-		err = 0;
 	}
 err_close:
 	if (fp != stdin)

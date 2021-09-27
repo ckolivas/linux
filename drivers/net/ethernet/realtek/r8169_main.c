@@ -1042,7 +1042,7 @@ static void r8168fp_adjust_ocp_cmd(struct rtl8169_private *tp, u32 *cmd, int typ
 {
 	/* based on RTL8168FP_OOBMAC_BASE in vendor driver */
 	if (tp->mac_version == RTL_GIGA_MAC_VER_52 && type == ERIAR_OOB)
-		*cmd |= 0x7f0 << 18;
+		*cmd |= 0xf70 << 18;
 }
 
 DECLARE_RTL_COND(rtl_eriar_cond)
@@ -1673,7 +1673,7 @@ static void rtl8169_get_strings(struct net_device *dev, u32 stringset, u8 *data)
 {
 	switch(stringset) {
 	case ETH_SS_STATS:
-		memcpy(data, *rtl8169_gstrings, sizeof(rtl8169_gstrings));
+		memcpy(data, rtl8169_gstrings, sizeof(rtl8169_gstrings));
 		break;
 	}
 }
@@ -2243,7 +2243,9 @@ static void rtl_pll_power_down(struct rtl8169_private *tp)
 	}
 
 	switch (tp->mac_version) {
-	case RTL_GIGA_MAC_VER_25 ... RTL_GIGA_MAC_VER_33:
+	case RTL_GIGA_MAC_VER_25 ... RTL_GIGA_MAC_VER_26:
+	case RTL_GIGA_MAC_VER_29 ... RTL_GIGA_MAC_VER_30:
+	case RTL_GIGA_MAC_VER_32 ... RTL_GIGA_MAC_VER_33:
 	case RTL_GIGA_MAC_VER_37:
 	case RTL_GIGA_MAC_VER_39:
 	case RTL_GIGA_MAC_VER_43:
@@ -2269,7 +2271,9 @@ static void rtl_pll_power_down(struct rtl8169_private *tp)
 static void rtl_pll_power_up(struct rtl8169_private *tp)
 {
 	switch (tp->mac_version) {
-	case RTL_GIGA_MAC_VER_25 ... RTL_GIGA_MAC_VER_33:
+	case RTL_GIGA_MAC_VER_25 ... RTL_GIGA_MAC_VER_26:
+	case RTL_GIGA_MAC_VER_29 ... RTL_GIGA_MAC_VER_30:
+	case RTL_GIGA_MAC_VER_32 ... RTL_GIGA_MAC_VER_33:
 	case RTL_GIGA_MAC_VER_37:
 	case RTL_GIGA_MAC_VER_39:
 	case RTL_GIGA_MAC_VER_43:
@@ -2349,14 +2353,14 @@ static void r8168dp_hw_jumbo_disable(struct rtl8169_private *tp)
 
 static void r8168e_hw_jumbo_enable(struct rtl8169_private *tp)
 {
-	RTL_W8(tp, MaxTxPacketSize, 0x3f);
+	RTL_W8(tp, MaxTxPacketSize, 0x24);
 	RTL_W8(tp, Config3, RTL_R8(tp, Config3) | Jumbo_En0);
 	RTL_W8(tp, Config4, RTL_R8(tp, Config4) | 0x01);
 }
 
 static void r8168e_hw_jumbo_disable(struct rtl8169_private *tp)
 {
-	RTL_W8(tp, MaxTxPacketSize, 0x0c);
+	RTL_W8(tp, MaxTxPacketSize, 0x3f);
 	RTL_W8(tp, Config3, RTL_R8(tp, Config3) & ~Jumbo_En0);
 	RTL_W8(tp, Config4, RTL_R8(tp, Config4) & ~0x01);
 }
@@ -2374,13 +2378,14 @@ static void r8168b_1_hw_jumbo_disable(struct rtl8169_private *tp)
 static void rtl_jumbo_config(struct rtl8169_private *tp)
 {
 	bool jumbo = tp->dev->mtu > ETH_DATA_LEN;
+	int readrq = 4096;
 
 	rtl_unlock_config_regs(tp);
 	switch (tp->mac_version) {
 	case RTL_GIGA_MAC_VER_12:
 	case RTL_GIGA_MAC_VER_17:
 		if (jumbo) {
-			pcie_set_readrq(tp->pci_dev, 512);
+			readrq = 512;
 			r8168b_1_hw_jumbo_enable(tp);
 		} else {
 			r8168b_1_hw_jumbo_disable(tp);
@@ -2388,7 +2393,7 @@ static void rtl_jumbo_config(struct rtl8169_private *tp)
 		break;
 	case RTL_GIGA_MAC_VER_18 ... RTL_GIGA_MAC_VER_26:
 		if (jumbo) {
-			pcie_set_readrq(tp->pci_dev, 512);
+			readrq = 512;
 			r8168c_hw_jumbo_enable(tp);
 		} else {
 			r8168c_hw_jumbo_disable(tp);
@@ -2413,8 +2418,15 @@ static void rtl_jumbo_config(struct rtl8169_private *tp)
 	}
 	rtl_lock_config_regs(tp);
 
-	if (!jumbo && pci_is_pcie(tp->pci_dev) && tp->supports_gmii)
-		pcie_set_readrq(tp->pci_dev, 4096);
+	if (pci_is_pcie(tp->pci_dev) && tp->supports_gmii)
+		pcie_set_readrq(tp->pci_dev, readrq);
+
+	/* Chip doesn't support pause in jumbo mode */
+	linkmode_mod_bit(ETHTOOL_LINK_MODE_Pause_BIT,
+			 tp->phydev->advertising, !jumbo);
+	linkmode_mod_bit(ETHTOOL_LINK_MODE_Asym_Pause_BIT,
+			 tp->phydev->advertising, !jumbo);
+	phy_start_aneg(tp->phydev);
 }
 
 DECLARE_RTL_COND(rtl_chipcmd_cond)
@@ -4080,17 +4092,72 @@ err_out:
 	return -EIO;
 }
 
-static bool rtl_test_hw_pad_bug(struct rtl8169_private *tp)
+static bool rtl_skb_is_udp(struct sk_buff *skb)
 {
+	int no = skb_network_offset(skb);
+	struct ipv6hdr *i6h, _i6h;
+	struct iphdr *ih, _ih;
+
+	switch (vlan_get_protocol(skb)) {
+	case htons(ETH_P_IP):
+		ih = skb_header_pointer(skb, no, sizeof(_ih), &_ih);
+		return ih && ih->protocol == IPPROTO_UDP;
+	case htons(ETH_P_IPV6):
+		i6h = skb_header_pointer(skb, no, sizeof(_i6h), &_i6h);
+		return i6h && i6h->nexthdr == IPPROTO_UDP;
+	default:
+		return false;
+	}
+}
+
+#define RTL_MIN_PATCH_LEN	47
+
+/* see rtl8125_get_patch_pad_len() in r8125 vendor driver */
+static unsigned int rtl8125_quirk_udp_padto(struct rtl8169_private *tp,
+					    struct sk_buff *skb)
+{
+	unsigned int padto = 0, len = skb->len;
+
+	if (rtl_is_8125(tp) && len < 128 + RTL_MIN_PATCH_LEN &&
+	    rtl_skb_is_udp(skb) && skb_transport_header_was_set(skb)) {
+		unsigned int trans_data_len = skb_tail_pointer(skb) -
+					      skb_transport_header(skb);
+
+		if (trans_data_len >= offsetof(struct udphdr, len) &&
+		    trans_data_len < RTL_MIN_PATCH_LEN) {
+			u16 dest = ntohs(udp_hdr(skb)->dest);
+
+			/* dest is a standard PTP port */
+			if (dest == 319 || dest == 320)
+				padto = len + RTL_MIN_PATCH_LEN - trans_data_len;
+		}
+
+		if (trans_data_len < sizeof(struct udphdr))
+			padto = max_t(unsigned int, padto,
+				      len + sizeof(struct udphdr) - trans_data_len);
+	}
+
+	return padto;
+}
+
+static unsigned int rtl_quirk_packet_padto(struct rtl8169_private *tp,
+					   struct sk_buff *skb)
+{
+	unsigned int padto;
+
+	padto = rtl8125_quirk_udp_padto(tp, skb);
+
 	switch (tp->mac_version) {
 	case RTL_GIGA_MAC_VER_34:
 	case RTL_GIGA_MAC_VER_60:
 	case RTL_GIGA_MAC_VER_61:
 	case RTL_GIGA_MAC_VER_63:
-		return true;
+		padto = max_t(unsigned int, padto, ETH_ZLEN);
 	default:
-		return false;
+		break;
 	}
+
+	return padto;
 }
 
 static void rtl8169_tso_csum_v1(struct sk_buff *skb, u32 *opts)
@@ -4162,9 +4229,10 @@ static bool rtl8169_tso_csum_v2(struct rtl8169_private *tp,
 
 		opts[1] |= transport_offset << TCPHO_SHIFT;
 	} else {
-		if (unlikely(skb->len < ETH_ZLEN && rtl_test_hw_pad_bug(tp)))
-			/* eth_skb_pad would free the skb on error */
-			return !__skb_put_padto(skb, ETH_ZLEN, false);
+		unsigned int padto = rtl_quirk_packet_padto(tp, skb);
+
+		/* skb_padto would free the skb on error */
+		return !__skb_put_padto(skb, padto, false);
 	}
 
 	return true;
@@ -4345,6 +4413,9 @@ static netdev_features_t rtl8169_features_check(struct sk_buff *skb,
 	} else if (skb->ip_summed == CHECKSUM_PARTIAL) {
 		/* work around hw bug on some chip versions */
 		if (skb->len < ETH_ZLEN)
+			features &= ~NETIF_F_CSUM_MASK;
+
+		if (rtl_quirk_packet_padto(tp, skb))
 			features &= ~NETIF_F_CSUM_MASK;
 
 		if (transport_offset > TCPHO_MAX &&
@@ -4647,8 +4718,6 @@ static int r8169_phy_connect(struct rtl8169_private *tp)
 	if (!tp->supports_gmii)
 		phy_set_max_speed(phydev, SPEED_100);
 
-	phy_support_asym_pause(phydev);
-
 	phy_attached_info(phydev);
 
 	return 0;
@@ -4663,6 +4732,9 @@ static void rtl8169_down(struct rtl8169_private *tp)
 
 	rtl8169_update_counters(tp);
 
+	pci_clear_master(tp->pci_dev);
+	rtl_pci_commit(tp);
+
 	rtl8169_cleanup(tp, true);
 
 	rtl_pll_power_down(tp);
@@ -4670,6 +4742,7 @@ static void rtl8169_down(struct rtl8169_private *tp)
 
 static void rtl8169_up(struct rtl8169_private *tp)
 {
+	pci_set_master(tp->pci_dev);
 	rtl_pll_power_up(tp);
 	rtl8169_init_phy(tp);
 	napi_enable(&tp->napi);
@@ -4692,9 +4765,9 @@ static int rtl8169_close(struct net_device *dev)
 
 	cancel_work_sync(&tp->wk.work);
 
-	phy_disconnect(tp->phydev);
-
 	free_irq(pci_irq_vector(pdev, 0), tp);
+
+	phy_disconnect(tp->phydev);
 
 	dma_free_coherent(&pdev->dev, R8169_RX_RING_BYTES, tp->RxDescArray,
 			  tp->RxPhyAddr);
@@ -5088,7 +5161,8 @@ static int r8169_mdio_register(struct rtl8169_private *tp)
 	new_bus->priv = tp;
 	new_bus->parent = &pdev->dev;
 	new_bus->irq[0] = PHY_IGNORE_INTERRUPT;
-	snprintf(new_bus->id, MII_BUS_ID_SIZE, "r8169-%x", pci_dev_id(pdev));
+	snprintf(new_bus->id, MII_BUS_ID_SIZE, "r8169-%x-%x",
+		 pci_domain_nr(pdev->bus), pci_dev_id(pdev));
 
 	new_bus->read = r8169_mdio_read_reg;
 	new_bus->write = r8169_mdio_write_reg;
@@ -5330,8 +5404,6 @@ static int rtl_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	rtl_hw_initialize(tp);
 
 	rtl_hw_reset(tp);
-
-	pci_set_master(pdev);
 
 	rc = rtl_alloc_irq(tp);
 	if (rc < 0) {

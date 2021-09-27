@@ -592,10 +592,10 @@ static void can_restart(struct net_device *dev)
 
 	cf->can_id |= CAN_ERR_RESTARTED;
 
-	netif_rx_ni(skb);
-
 	stats->rx_packets++;
 	stats->rx_bytes += cf->can_dlc;
+
+	netif_rx_ni(skb);
 
 restart:
 	netdev_dbg(dev, "restarted\n");
@@ -747,6 +747,7 @@ EXPORT_SYMBOL_GPL(alloc_can_err_skb);
 struct net_device *alloc_candev_mqs(int sizeof_priv, unsigned int echo_skb_max,
 				    unsigned int txqs, unsigned int rxqs)
 {
+	struct can_ml_priv *can_ml;
 	struct net_device *dev;
 	struct can_priv *priv;
 	int size;
@@ -778,7 +779,8 @@ struct net_device *alloc_candev_mqs(int sizeof_priv, unsigned int echo_skb_max,
 	priv = netdev_priv(dev);
 	priv->dev = dev;
 
-	dev->ml_priv = (void *)priv + ALIGN(sizeof_priv, NETDEV_ALIGN);
+	can_ml = (void *)priv + ALIGN(sizeof_priv, NETDEV_ALIGN);
+	can_set_ml_priv(dev, can_ml);
 
 	if (echo_skb_max) {
 		priv->echo_skb_max = echo_skb_max;
@@ -1163,7 +1165,7 @@ static int can_fill_info(struct sk_buff *skb, const struct net_device *dev)
 {
 	struct can_priv *priv = netdev_priv(dev);
 	struct can_ctrlmode cm = {.flags = priv->ctrlmode};
-	struct can_berr_counter bec;
+	struct can_berr_counter bec = { };
 	enum can_state state = priv->state;
 
 	if (priv->do_get_state)
@@ -1255,6 +1257,7 @@ static void can_dellink(struct net_device *dev, struct list_head *head)
 
 static struct rtnl_link_ops can_link_ops __read_mostly = {
 	.kind		= "can",
+	.netns_refund	= true,
 	.maxtype	= IFLA_CAN_MAX,
 	.policy		= can_policy,
 	.setup		= can_setup,

@@ -981,8 +981,7 @@ void mlx5_unregister_debugfs(void);
 void mlx5_fill_page_array(struct mlx5_frag_buf *buf, __be64 *pas);
 void mlx5_fill_page_frag_array_perm(struct mlx5_frag_buf *buf, __be64 *pas, u8 perm);
 void mlx5_fill_page_frag_array(struct mlx5_frag_buf *frag_buf, __be64 *pas);
-int mlx5_vector2eqn(struct mlx5_core_dev *dev, int vector, int *eqn,
-		    unsigned int *irqn);
+int mlx5_vector2eqn(struct mlx5_core_dev *dev, int vector, int *eqn);
 int mlx5_core_attach_mcg(struct mlx5_core_dev *dev, union ib_gid *mgid, u32 qpn);
 int mlx5_core_detach_mcg(struct mlx5_core_dev *dev, union ib_gid *mgid, u32 qpn);
 
@@ -1211,24 +1210,6 @@ static inline bool mlx5_is_roce_enabled(struct mlx5_core_dev *dev)
 					   DEVLINK_PARAM_GENERIC_ID_ENABLE_ROCE,
 					   &val);
 	return val.vbool;
-}
-
-/**
- * mlx5_core_net - Provide net namespace of the mlx5_core_dev
- * @dev: mlx5 core device
- *
- * mlx5_core_net() returns the net namespace of mlx5 core device.
- * This can be called only in below described limited context.
- * (a) When a devlink instance for mlx5_core is registered and
- *     when devlink reload operation is disabled.
- *     or
- * (b) during devlink reload reload_down() and reload_up callbacks
- *     where it is ensured that devlink instance's net namespace is
- *     stable.
- */
-static inline struct net *mlx5_core_net(struct mlx5_core_dev *dev)
-{
-	return devlink_net(priv_to_devlink(dev));
 }
 
 #endif /* MLX5_DRIVER_H */

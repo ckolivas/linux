@@ -182,7 +182,7 @@ static int strset_parse_request(struct ethnl_req_info *req_base,
 		ret = strset_get_id(attr, &id, extack);
 		if (ret < 0)
 			return ret;
-		if (ret >= ETH_SS_COUNT) {
+		if (id >= ETH_SS_COUNT) {
 			NL_SET_ERR_MSG_ATTR(extack, attr,
 					    "unknown string set id");
 			return -EOPNOTSUPP;
@@ -327,6 +327,8 @@ static int strset_reply_size(const struct ethnl_req_info *req_base,
 	unsigned int i;
 	int len = 0;
 	int ret;
+
+	len += nla_total_size(0); /* ETHTOOL_A_STRSET_STRINGSETS */
 
 	for (i = 0; i < ETH_SS_COUNT; i++) {
 		const struct strset_info *set_info = &data->sets[i];

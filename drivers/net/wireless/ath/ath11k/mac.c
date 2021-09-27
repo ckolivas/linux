@@ -2525,6 +2525,12 @@ static int ath11k_mac_op_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
 	 */
 	spin_lock_bh(&ab->base_lock);
 	peer = ath11k_peer_find(ab, arvif->vdev_id, peer_addr);
+
+	/* flush the fragments cache during key (re)install to
+	 * ensure all frags in the new frag list belong to the same key.
+	 */
+	if (peer && cmd == SET_KEY)
+		ath11k_peer_frags_flush(ar, peer);
 	spin_unlock_bh(&ab->base_lock);
 
 	if (!peer) {
@@ -2986,6 +2992,7 @@ static int ath11k_mac_station_add(struct ath11k *ar,
 	}
 
 	if (ab->hw_params.vdev_start_delay &&
+	    !arvif->is_started &&
 	    arvif->vdev_type != WMI_VDEV_TYPE_AP) {
 		ret = ath11k_start_vdev_delay(ar->hw, vif);
 		if (ret) {
@@ -3977,21 +3984,20 @@ static void ath11k_mgmt_over_wmi_tx_purge(struct ath11k *ar)
 static void ath11k_mgmt_over_wmi_tx_work(struct work_struct *work)
 {
 	struct ath11k *ar = container_of(work, struct ath11k, wmi_mgmt_tx_work);
-	struct ieee80211_tx_info *info;
+	struct ath11k_skb_cb *skb_cb;
 	struct ath11k_vif *arvif;
 	struct sk_buff *skb;
 	int ret;
 
 	while ((skb = skb_dequeue(&ar->wmi_mgmt_tx_queue)) != NULL) {
-		info = IEEE80211_SKB_CB(skb);
-		if (!info->control.vif) {
-			ath11k_warn(ar->ab, "no vif found for mgmt frame, flags 0x%x\n",
-				    info->control.flags);
+		skb_cb = ATH11K_SKB_CB(skb);
+		if (!skb_cb->vif) {
+			ath11k_warn(ar->ab, "no vif found for mgmt frame\n");
 			ieee80211_free_txskb(ar->hw, skb);
 			continue;
 		}
 
-		arvif = ath11k_vif_to_arvif(info->control.vif);
+		arvif = ath11k_vif_to_arvif(skb_cb->vif);
 		if (ar->allocated_vdev_map & (1LL << arvif->vdev_id) &&
 		    arvif->is_started) {
 			ret = ath11k_mac_mgmt_tx_wmi(ar, arvif, skb);
@@ -4004,8 +4010,8 @@ static void ath11k_mgmt_over_wmi_tx_work(struct work_struct *work)
 			}
 		} else {
 			ath11k_warn(ar->ab,
-				    "dropping mgmt frame for vdev %d, flags 0x%x is_started %d\n",
-				    arvif->vdev_id, info->control.flags,
+				    "dropping mgmt frame for vdev %d, is_started %d\n",
+				    arvif->vdev_id,
 				    arvif->is_started);
 			ieee80211_free_txskb(ar->hw, skb);
 		}
@@ -4053,10 +4059,20 @@ static void ath11k_mac_op_tx(struct ieee80211_hw *hw,
 	struct ieee80211_vif *vif = info->control.vif;
 	struct ath11k_vif *arvif = ath11k_vif_to_arvif(vif);
 	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *)skb->data;
+	struct ieee80211_key_conf *key = info->control.hw_key;
+	u32 info_flags = info->flags;
 	bool is_prb_rsp;
 	int ret;
 
-	if (info->flags & IEEE80211_TX_CTL_HW_80211_ENCAP) {
+	memset(skb_cb, 0, sizeof(*skb_cb));
+	skb_cb->vif = vif;
+
+	if (key) {
+		skb_cb->cipher = key->cipher;
+		skb_cb->flags |= ATH11K_SKB_CIPHER_SET;
+	}
+
+	if (info_flags & IEEE80211_TX_CTL_HW_80211_ENCAP) {
 		skb_cb->flags |= ATH11K_SKB_HW_80211_ENCAP;
 	} else if (ieee80211_is_mgmt(hdr->frame_control)) {
 		is_prb_rsp = ieee80211_is_probe_resp(hdr->frame_control);
@@ -4094,7 +4110,8 @@ static int ath11k_mac_config_mon_status_default(struct ath11k *ar, bool enable)
 
 	if (enable) {
 		tlv_filter = ath11k_mac_mon_status_filter_default;
-		tlv_filter.rx_filter = ath11k_debugfs_rx_filter(ar);
+		if (ath11k_debugfs_rx_filter(ar))
+			tlv_filter.rx_filter = ath11k_debugfs_rx_filter(ar);
 	}
 
 	for (i = 0; i < ab->hw_params.num_rxmda_per_pdev; i++) {
@@ -4203,11 +4220,6 @@ static int ath11k_mac_op_start(struct ieee80211_hw *hw)
 	/* Configure the hash seed for hash based reo dest ring selection */
 	ath11k_wmi_pdev_lro_cfg(ar, ar->pdev->pdev_id);
 
-	mutex_unlock(&ar->conf_mutex);
-
-	rcu_assign_pointer(ab->pdevs_active[ar->pdev_idx],
-			   &ab->pdevs[ar->pdev_idx]);
-
 	/* allow device to enter IMPS */
 	if (ab->hw_params.idle_ps) {
 		ret = ath11k_wmi_pdev_set_param(ar, WMI_PDEV_PARAM_IDLE_PS_CONFIG,
@@ -4217,6 +4229,12 @@ static int ath11k_mac_op_start(struct ieee80211_hw *hw)
 			goto err;
 		}
 	}
+
+	mutex_unlock(&ar->conf_mutex);
+
+	rcu_assign_pointer(ab->pdevs_active[ar->pdev_idx],
+			   &ab->pdevs[ar->pdev_idx]);
+
 	return 0;
 
 err:
@@ -4578,8 +4596,22 @@ static int ath11k_mac_op_add_interface(struct ieee80211_hw *hw,
 
 err_peer_del:
 	if (arvif->vdev_type == WMI_VDEV_TYPE_AP) {
+		reinit_completion(&ar->peer_delete_done);
+
+		ret = ath11k_wmi_send_peer_delete_cmd(ar, vif->addr,
+						      arvif->vdev_id);
+		if (ret) {
+			ath11k_warn(ar->ab, "failed to delete peer vdev_id %d addr %pM\n",
+				    arvif->vdev_id, vif->addr);
+			goto err;
+		}
+
+		ret = ath11k_wait_for_peer_delete_done(ar, arvif->vdev_id,
+						       vif->addr);
+		if (ret)
+			goto err;
+
 		ar->num_peers--;
-		ath11k_wmi_send_peer_delete_cmd(ar, vif->addr, arvif->vdev_id);
 	}
 
 err_vdev_del:
@@ -5091,17 +5123,17 @@ ath11k_mac_update_vif_chan(struct ath11k *ar,
 		if (WARN_ON(!arvif->is_up))
 			continue;
 
-		ret = ath11k_mac_setup_bcn_tmpl(arvif);
-		if (ret)
-			ath11k_warn(ab, "failed to update bcn tmpl during csa: %d\n",
-				    ret);
-
 		ret = ath11k_mac_vdev_restart(arvif, &vifs[i].new_ctx->def);
 		if (ret) {
 			ath11k_warn(ab, "failed to restart vdev %d: %d\n",
 				    arvif->vdev_id, ret);
 			continue;
 		}
+
+		ret = ath11k_mac_setup_bcn_tmpl(arvif);
+		if (ret)
+			ath11k_warn(ab, "failed to update bcn tmpl during csa: %d\n",
+				    ret);
 
 		ret = ath11k_wmi_vdev_up(arvif->ar, arvif->vdev_id, arvif->aid,
 					 arvif->bssid);
@@ -5223,22 +5255,31 @@ ath11k_mac_op_assign_vif_chanctx(struct ieee80211_hw *hw,
 	/* for QCA6390 bss peer must be created before vdev_start */
 	if (ab->hw_params.vdev_start_delay &&
 	    arvif->vdev_type != WMI_VDEV_TYPE_AP &&
-	    arvif->vdev_type != WMI_VDEV_TYPE_MONITOR) {
+	    arvif->vdev_type != WMI_VDEV_TYPE_MONITOR &&
+	    !ath11k_peer_find_by_vdev_id(ab, arvif->vdev_id)) {
 		memcpy(&arvif->chanctx, ctx, sizeof(*ctx));
-		mutex_unlock(&ar->conf_mutex);
-		return 0;
+		ret = 0;
+		goto out;
 	}
 
 	if (WARN_ON(arvif->is_started)) {
-		mutex_unlock(&ar->conf_mutex);
-		return -EBUSY;
+		ret = -EBUSY;
+		goto out;
 	}
 
-	if (ab->hw_params.vdev_start_delay) {
+	if (ab->hw_params.vdev_start_delay &&
+	    arvif->vdev_type != WMI_VDEV_TYPE_AP &&
+	    arvif->vdev_type != WMI_VDEV_TYPE_MONITOR) {
 		param.vdev_id = arvif->vdev_id;
 		param.peer_type = WMI_PEER_TYPE_DEFAULT;
 		param.peer_addr = ar->mac_addr;
+
 		ret = ath11k_peer_create(ar, arvif, NULL, &param);
+		if (ret) {
+			ath11k_warn(ab, "failed to create peer after vdev start delay: %d",
+				    ret);
+			goto out;
+		}
 	}
 
 	ret = ath11k_mac_vdev_start(arvif, &ctx->def);
@@ -5246,23 +5287,21 @@ ath11k_mac_op_assign_vif_chanctx(struct ieee80211_hw *hw,
 		ath11k_warn(ab, "failed to start vdev %i addr %pM on freq %d: %d\n",
 			    arvif->vdev_id, vif->addr,
 			    ctx->def.chan->center_freq, ret);
-		goto err;
+		goto out;
 	}
 	if (arvif->vdev_type == WMI_VDEV_TYPE_MONITOR) {
 		ret = ath11k_monitor_vdev_up(ar, arvif->vdev_id);
 		if (ret)
-			goto err;
+			goto out;
 	}
 
 	arvif->is_started = true;
 
 	/* TODO: Setup ps and cts/rts protection */
 
-	mutex_unlock(&ar->conf_mutex);
+	ret = 0;
 
-	return 0;
-
-err:
+out:
 	mutex_unlock(&ar->conf_mutex);
 
 	return ret;
@@ -6284,16 +6323,19 @@ static int __ath11k_mac_register(struct ath11k *ar)
 	ret = ath11k_regd_update(ar, true);
 	if (ret) {
 		ath11k_err(ar->ab, "ath11k regd update failed: %d\n", ret);
-		goto err_free_if_combs;
+		goto err_unregister_hw;
 	}
 
 	ret = ath11k_debugfs_register(ar);
 	if (ret) {
 		ath11k_err(ar->ab, "debugfs registration failed: %d\n", ret);
-		goto err_free_if_combs;
+		goto err_unregister_hw;
 	}
 
 	return 0;
+
+err_unregister_hw:
+	ieee80211_unregister_hw(ar->hw);
 
 err_free_if_combs:
 	kfree(ar->hw->wiphy->iface_combinations[0].limits);
@@ -6398,6 +6440,7 @@ int ath11k_mac_allocate(struct ath11k_base *ab)
 		mutex_init(&ar->conf_mutex);
 		init_completion(&ar->vdev_setup_done);
 		init_completion(&ar->peer_assoc_done);
+		init_completion(&ar->peer_delete_done);
 		init_completion(&ar->install_key_done);
 		init_completion(&ar->bss_survey_done);
 		init_completion(&ar->scan.started);

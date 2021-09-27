@@ -159,21 +159,28 @@ static int i40e_run_xdp_zc(struct i40e_ring *rx_ring, struct xdp_buff *xdp)
 	xdp_prog = READ_ONCE(rx_ring->xdp_prog);
 	act = bpf_prog_run_xdp(xdp_prog, xdp);
 
+	if (likely(act == XDP_REDIRECT)) {
+		err = xdp_do_redirect(rx_ring->netdev, xdp, xdp_prog);
+		if (err)
+			goto out_failure;
+		rcu_read_unlock();
+		return I40E_XDP_REDIR;
+	}
+
 	switch (act) {
 	case XDP_PASS:
 		break;
 	case XDP_TX:
 		xdp_ring = rx_ring->vsi->xdp_rings[rx_ring->queue_index];
 		result = i40e_xmit_xdp_tx_ring(xdp, xdp_ring);
-		break;
-	case XDP_REDIRECT:
-		err = xdp_do_redirect(rx_ring->netdev, xdp, xdp_prog);
-		result = !err ? I40E_XDP_REDIR : I40E_XDP_CONSUMED;
+		if (result == I40E_XDP_CONSUMED)
+			goto out_failure;
 		break;
 	default:
 		bpf_warn_invalid_xdp_action(act);
 		fallthrough;
 	case XDP_ABORTED:
+out_failure:
 		trace_xdp_exception(rx_ring->netdev, xdp_prog, act);
 		fallthrough; /* handle aborts by dropping packet */
 	case XDP_DROP:
@@ -219,8 +226,11 @@ bool i40e_alloc_rx_buffers_zc(struct i40e_ring *rx_ring, u16 count)
 	} while (count);
 
 no_buffers:
-	if (rx_ring->next_to_use != ntu)
+	if (rx_ring->next_to_use != ntu) {
+		/* clear the status bits for the next_to_use descriptor */
+		rx_desc->wb.qword1.status_error_len = 0;
 		i40e_release_rx_desc(rx_ring, ntu);
+	}
 
 	return ok;
 }
@@ -345,12 +355,12 @@ int i40e_clean_rx_irq_zc(struct i40e_ring *rx_ring, int budget)
 		 * SBP is *not* set in PRT_SBPVSI (default not set).
 		 */
 		skb = i40e_construct_skb_zc(rx_ring, *bi);
-		*bi = NULL;
 		if (!skb) {
 			rx_ring->rx_stats.alloc_buff_failed++;
 			break;
 		}
 
+		*bi = NULL;
 		cleaned_count++;
 		i40e_inc_ntc(rx_ring);
 

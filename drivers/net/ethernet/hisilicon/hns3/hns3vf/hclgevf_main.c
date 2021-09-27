@@ -901,8 +901,8 @@ static int hclgevf_set_rss_tuple(struct hnae3_handle *handle,
 		req->ipv4_sctp_en = tuple_sets;
 		break;
 	case SCTP_V6_FLOW:
-		if ((nfc->data & RXH_L4_B_0_1) ||
-		    (nfc->data & RXH_L4_B_2_3))
+		if (hdev->ae_dev->dev_version <= HNAE3_DEVICE_VERSION_V2 &&
+		    (nfc->data & (RXH_L4_B_0_1 | RXH_L4_B_2_3)))
 			return -EINVAL;
 
 		req->ipv6_sctp_en = tuple_sets;
@@ -2352,6 +2352,8 @@ static irqreturn_t hclgevf_misc_irq_handle(int irq, void *data)
 
 	hclgevf_enable_vector(&hdev->misc_vector, false);
 	event_cause = hclgevf_check_evt_cause(hdev, &clearval);
+	if (event_cause != HCLGEVF_VECTOR0_EVENT_OTHER)
+		hclgevf_clear_event_cause(hdev, clearval);
 
 	switch (event_cause) {
 	case HCLGEVF_VECTOR0_EVENT_RST:
@@ -2364,10 +2366,8 @@ static irqreturn_t hclgevf_misc_irq_handle(int irq, void *data)
 		break;
 	}
 
-	if (event_cause != HCLGEVF_VECTOR0_EVENT_OTHER) {
-		hclgevf_clear_event_cause(hdev, clearval);
+	if (event_cause != HCLGEVF_VECTOR0_EVENT_OTHER)
 		hclgevf_enable_vector(&hdev->misc_vector, true);
-	}
 
 	return IRQ_HANDLED;
 }
@@ -2481,7 +2481,10 @@ static void hclgevf_rss_init_cfg(struct hclgevf_dev *hdev)
 		tuple_sets->ipv4_fragment_en = HCLGEVF_RSS_INPUT_TUPLE_OTHER;
 		tuple_sets->ipv6_tcp_en = HCLGEVF_RSS_INPUT_TUPLE_OTHER;
 		tuple_sets->ipv6_udp_en = HCLGEVF_RSS_INPUT_TUPLE_OTHER;
-		tuple_sets->ipv6_sctp_en = HCLGEVF_RSS_INPUT_TUPLE_SCTP;
+		tuple_sets->ipv6_sctp_en =
+			hdev->ae_dev->dev_version <= HNAE3_DEVICE_VERSION_V2 ?
+					HCLGEVF_RSS_INPUT_TUPLE_SCTP_NO_PORT :
+					HCLGEVF_RSS_INPUT_TUPLE_SCTP;
 		tuple_sets->ipv6_fragment_en = HCLGEVF_RSS_INPUT_TUPLE_OTHER;
 	}
 
@@ -2515,6 +2518,16 @@ static int hclgevf_rss_init_hw(struct hclgevf_dev *hdev)
 
 static int hclgevf_init_vlan_config(struct hclgevf_dev *hdev)
 {
+	struct hnae3_handle *nic = &hdev->nic;
+	int ret;
+
+	ret = hclgevf_en_hw_strip_rxvtag(nic, true);
+	if (ret) {
+		dev_err(&hdev->pdev->dev,
+			"failed to enable rx vlan offload, ret = %d\n", ret);
+		return ret;
+	}
+
 	return hclgevf_set_vlan_filter(&hdev->nic, htons(ETH_P_8021Q), 0,
 				       false);
 }
@@ -2551,13 +2564,13 @@ static int hclgevf_ae_start(struct hnae3_handle *handle)
 {
 	struct hclgevf_dev *hdev = hclgevf_ae_get_hdev(handle);
 
+	clear_bit(HCLGEVF_STATE_DOWN, &hdev->state);
+
 	hclgevf_reset_tqp_stats(handle);
 
 	hclgevf_request_link_info(hdev);
 
 	hclgevf_update_link_mode(hdev);
-
-	clear_bit(HCLGEVF_STATE_DOWN, &hdev->state);
 
 	return 0;
 }

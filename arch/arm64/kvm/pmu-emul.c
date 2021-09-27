@@ -578,6 +578,7 @@ void kvm_pmu_handle_pmcr(struct kvm_vcpu *vcpu, u64 val)
 		kvm_pmu_set_counter_value(vcpu, ARMV8_PMU_CYCLE_IDX, 0);
 
 	if (val & ARMV8_PMU_PMCR_P) {
+		mask &= ~BIT(ARMV8_PMU_CYCLE_IDX);
 		for_each_set_bit(i, &mask, 32)
 			kvm_pmu_set_counter_value(vcpu, i, 0);
 	}
@@ -788,7 +789,7 @@ u64 kvm_pmu_get_pmceid(struct kvm_vcpu *vcpu, bool pmceid1)
 {
 	unsigned long *bmap = vcpu->kvm->arch.pmu_filter;
 	u64 val, mask = 0;
-	int base, i;
+	int base, i, nr_events;
 
 	if (!pmceid1) {
 		val = read_sysreg(pmceid0_el0);
@@ -801,13 +802,17 @@ u64 kvm_pmu_get_pmceid(struct kvm_vcpu *vcpu, bool pmceid1)
 	if (!bmap)
 		return val;
 
+	nr_events = kvm_pmu_event_mask(vcpu->kvm) + 1;
+
 	for (i = 0; i < 32; i += 8) {
 		u64 byte;
 
 		byte = bitmap_get_value8(bmap, base + i);
 		mask |= byte << i;
-		byte = bitmap_get_value8(bmap, 0x4000 + base + i);
-		mask |= byte << (32 + i);
+		if (nr_events >= (0x4000 + base + 32)) {
+			byte = bitmap_get_value8(bmap, 0x4000 + base + i);
+			mask |= byte << (32 + i);
+		}
 	}
 
 	return val & mask;

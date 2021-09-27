@@ -1003,7 +1003,7 @@ static void decode_smca_error(struct mce *m)
 		pr_cont(", %s.\n", smca_mce_descs[bank_type].descs[xec]);
 
 	if (bank_type == SMCA_UMC && xec == 0 && decode_dram_ecc)
-		decode_dram_ecc(cpu_to_node(m->extcpu), m);
+		decode_dram_ecc(topology_die_id(m->extcpu), m);
 }
 
 static inline void amd_decode_err_code(u16 ec)
@@ -1174,6 +1174,9 @@ static int __init mce_amd_init(void)
 
 	if (c->x86_vendor != X86_VENDOR_AMD &&
 	    c->x86_vendor != X86_VENDOR_HYGON)
+		return -ENODEV;
+
+	if (cpu_feature_enabled(X86_FEATURE_HYPERVISOR))
 		return -ENODEV;
 
 	if (boot_cpu_has(X86_FEATURE_SMCA)) {

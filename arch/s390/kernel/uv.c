@@ -364,11 +364,20 @@ static ssize_t uv_query_facilities(struct kobject *kobj,
 static struct kobj_attribute uv_query_facilities_attr =
 	__ATTR(facilities, 0444, uv_query_facilities, NULL);
 
+static ssize_t uv_query_feature_indications(struct kobject *kobj,
+					    struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%lx\n", uv_info.uv_feature_indications);
+}
+
+static struct kobj_attribute uv_query_feature_indications_attr =
+	__ATTR(feature_indications, 0444, uv_query_feature_indications, NULL);
+
 static ssize_t uv_query_max_guest_cpus(struct kobject *kobj,
 				       struct kobj_attribute *attr, char *page)
 {
 	return scnprintf(page, PAGE_SIZE, "%d\n",
-			uv_info.max_guest_cpus);
+			uv_info.max_guest_cpu_id + 1);
 }
 
 static struct kobj_attribute uv_query_max_guest_cpus_attr =
@@ -396,6 +405,7 @@ static struct kobj_attribute uv_query_max_guest_addr_attr =
 
 static struct attribute *uv_query_attrs[] = {
 	&uv_query_facilities_attr.attr,
+	&uv_query_feature_indications_attr.attr,
 	&uv_query_max_guest_cpus_attr.attr,
 	&uv_query_max_guest_vms_attr.attr,
 	&uv_query_max_guest_addr_attr.attr,

@@ -150,7 +150,7 @@ static int parse_write_buffer_into_params(char *wr_buf, uint32_t wr_buf_size,
  *
  * --- to get dp configuration
  *
- * cat link_settings
+ * cat /sys/kernel/debug/dri/0/DP-x/link_settings
  *
  * It will list current, verified, reported, preferred dp configuration.
  * current -- for current video mode
@@ -163,7 +163,7 @@ static int parse_write_buffer_into_params(char *wr_buf, uint32_t wr_buf_size,
  * echo <lane_count>  <link_rate> > link_settings
  *
  * for example, to force to  2 lane, 2.7GHz,
- * echo 4 0xa > link_settings
+ * echo 4 0xa > /sys/kernel/debug/dri/0/DP-x/link_settings
  *
  * spread_spectrum could not be changed dynamically.
  *
@@ -171,7 +171,7 @@ static int parse_write_buffer_into_params(char *wr_buf, uint32_t wr_buf_size,
  * done. please check link settings after force operation to see if HW get
  * programming.
  *
- * cat link_settings
+ * cat /sys/kernel/debug/dri/0/DP-x/link_settings
  *
  * check current and preferred settings.
  *
@@ -197,29 +197,29 @@ static ssize_t dp_link_settings_read(struct file *f, char __user *buf,
 
 	rd_buf_ptr = rd_buf;
 
-	str_len = strlen("Current:  %d  %d  %d  ");
-	snprintf(rd_buf_ptr, str_len, "Current:  %d  %d  %d  ",
+	str_len = strlen("Current:  %d  0x%x  %d  ");
+	snprintf(rd_buf_ptr, str_len, "Current:  %d  0x%x  %d  ",
 			link->cur_link_settings.lane_count,
 			link->cur_link_settings.link_rate,
 			link->cur_link_settings.link_spread);
 	rd_buf_ptr += str_len;
 
-	str_len = strlen("Verified:  %d  %d  %d  ");
-	snprintf(rd_buf_ptr, str_len, "Verified:  %d  %d  %d  ",
+	str_len = strlen("Verified:  %d  0x%x  %d  ");
+	snprintf(rd_buf_ptr, str_len, "Verified:  %d  0x%x  %d  ",
 			link->verified_link_cap.lane_count,
 			link->verified_link_cap.link_rate,
 			link->verified_link_cap.link_spread);
 	rd_buf_ptr += str_len;
 
-	str_len = strlen("Reported:  %d  %d  %d  ");
-	snprintf(rd_buf_ptr, str_len, "Reported:  %d  %d  %d  ",
+	str_len = strlen("Reported:  %d  0x%x  %d  ");
+	snprintf(rd_buf_ptr, str_len, "Reported:  %d  0x%x  %d  ",
 			link->reported_link_cap.lane_count,
 			link->reported_link_cap.link_rate,
 			link->reported_link_cap.link_spread);
 	rd_buf_ptr += str_len;
 
-	str_len = strlen("Preferred:  %d  %d  %d  ");
-	snprintf(rd_buf_ptr, str_len, "Preferred:  %d  %d  %d\n",
+	str_len = strlen("Preferred:  %d  0x%x  %d  ");
+	snprintf(rd_buf_ptr, str_len, "Preferred:  %d  0x%x  %d\n",
 			link->preferred_link_setting.lane_count,
 			link->preferred_link_setting.link_rate,
 			link->preferred_link_setting.link_spread);
@@ -255,7 +255,7 @@ static ssize_t dp_link_settings_write(struct file *f, const char __user *buf,
 	int max_param_num = 2;
 	uint8_t param_nums = 0;
 	long param[2];
-	bool valid_input = false;
+	bool valid_input = true;
 
 	if (size == 0)
 		return -EINVAL;
@@ -282,9 +282,9 @@ static ssize_t dp_link_settings_write(struct file *f, const char __user *buf,
 	case LANE_COUNT_ONE:
 	case LANE_COUNT_TWO:
 	case LANE_COUNT_FOUR:
-		valid_input = true;
 		break;
 	default:
+		valid_input = false;
 		break;
 	}
 
@@ -294,9 +294,9 @@ static ssize_t dp_link_settings_write(struct file *f, const char __user *buf,
 	case LINK_RATE_RBR2:
 	case LINK_RATE_HIGH2:
 	case LINK_RATE_HIGH3:
-		valid_input = true;
 		break;
 	default:
+		valid_input = false;
 		break;
 	}
 
@@ -310,10 +310,11 @@ static ssize_t dp_link_settings_write(struct file *f, const char __user *buf,
 	 * spread spectrum will not be changed
 	 */
 	prefer_link_settings.link_spread = link->cur_link_settings.link_spread;
+	prefer_link_settings.use_link_rate_set = false;
 	prefer_link_settings.lane_count = param[0];
 	prefer_link_settings.link_rate = param[1];
 
-	dc_link_set_preferred_link_settings(dc, &prefer_link_settings, link);
+	dc_link_set_preferred_training_settings(dc, &prefer_link_settings, NULL, link, true);
 
 	kfree(wr_buf);
 	return size;

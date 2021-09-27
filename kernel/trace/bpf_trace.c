@@ -93,9 +93,6 @@ unsigned int trace_call_bpf(struct trace_event_call *call, void *ctx)
 {
 	unsigned int ret;
 
-	if (in_nmi()) /* not supported yet */
-		return 1;
-
 	cant_sleep();
 
 	if (unlikely(__this_cpu_inc_return(bpf_prog_active) != 1)) {
@@ -215,16 +212,11 @@ const struct bpf_func_proto bpf_probe_read_user_str_proto = {
 static __always_inline int
 bpf_probe_read_kernel_common(void *dst, u32 size, const void *unsafe_ptr)
 {
-	int ret = security_locked_down(LOCKDOWN_BPF_READ);
+	int ret;
 
-	if (unlikely(ret < 0))
-		goto fail;
 	ret = copy_from_kernel_nofault(dst, unsafe_ptr, size);
 	if (unlikely(ret < 0))
-		goto fail;
-	return ret;
-fail:
-	memset(dst, 0, size);
+		memset(dst, 0, size);
 	return ret;
 }
 
@@ -246,10 +238,7 @@ const struct bpf_func_proto bpf_probe_read_kernel_proto = {
 static __always_inline int
 bpf_probe_read_kernel_str_common(void *dst, u32 size, const void *unsafe_ptr)
 {
-	int ret = security_locked_down(LOCKDOWN_BPF_READ);
-
-	if (unlikely(ret < 0))
-		goto fail;
+	int ret;
 
 	/*
 	 * The strncpy_from_kernel_nofault() call will likely not fill the
@@ -262,11 +251,7 @@ bpf_probe_read_kernel_str_common(void *dst, u32 size, const void *unsafe_ptr)
 	 */
 	ret = strncpy_from_kernel_nofault(dst, unsafe_ptr, size);
 	if (unlikely(ret < 0))
-		goto fail;
-
-	return ret;
-fail:
-	memset(dst, 0, size);
+		memset(dst, 0, size);
 	return ret;
 }
 
@@ -1287,25 +1272,30 @@ bpf_tracing_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 		return &bpf_get_numa_node_id_proto;
 	case BPF_FUNC_perf_event_read:
 		return &bpf_perf_event_read_proto;
-	case BPF_FUNC_probe_write_user:
-		return bpf_get_probe_write_proto();
 	case BPF_FUNC_current_task_under_cgroup:
 		return &bpf_current_task_under_cgroup_proto;
 	case BPF_FUNC_get_prandom_u32:
 		return &bpf_get_prandom_u32_proto;
+	case BPF_FUNC_probe_write_user:
+		return security_locked_down(LOCKDOWN_BPF_WRITE_USER) < 0 ?
+		       NULL : bpf_get_probe_write_proto();
 	case BPF_FUNC_probe_read_user:
 		return &bpf_probe_read_user_proto;
 	case BPF_FUNC_probe_read_kernel:
-		return &bpf_probe_read_kernel_proto;
+		return security_locked_down(LOCKDOWN_BPF_READ) < 0 ?
+		       NULL : &bpf_probe_read_kernel_proto;
 	case BPF_FUNC_probe_read_user_str:
 		return &bpf_probe_read_user_str_proto;
 	case BPF_FUNC_probe_read_kernel_str:
-		return &bpf_probe_read_kernel_str_proto;
+		return security_locked_down(LOCKDOWN_BPF_READ) < 0 ?
+		       NULL : &bpf_probe_read_kernel_str_proto;
 #ifdef CONFIG_ARCH_HAS_NON_OVERLAPPING_ADDRESS_SPACE
 	case BPF_FUNC_probe_read:
-		return &bpf_probe_read_compat_proto;
+		return security_locked_down(LOCKDOWN_BPF_READ) < 0 ?
+		       NULL : &bpf_probe_read_compat_proto;
 	case BPF_FUNC_probe_read_str:
-		return &bpf_probe_read_compat_str_proto;
+		return security_locked_down(LOCKDOWN_BPF_READ) < 0 ?
+		       NULL : &bpf_probe_read_compat_str_proto;
 #endif
 #ifdef CONFIG_CGROUPS
 	case BPF_FUNC_get_current_cgroup_id:
@@ -2041,10 +2031,12 @@ struct bpf_raw_event_map *bpf_get_raw_tracepoint(const char *name)
 
 void bpf_put_raw_tracepoint(struct bpf_raw_event_map *btp)
 {
-	struct module *mod = __module_address((unsigned long)btp);
+	struct module *mod;
 
-	if (mod)
-		module_put(mod);
+	preempt_disable();
+	mod = __module_address((unsigned long)btp);
+	module_put(mod);
+	preempt_enable();
 }
 
 static __always_inline
@@ -2115,7 +2107,8 @@ static int __bpf_probe_register(struct bpf_raw_event_map *btp, struct bpf_prog *
 	if (prog->aux->max_tp_access > btp->writable_size)
 		return -EINVAL;
 
-	return tracepoint_probe_register(tp, (void *)btp->bpf_func, prog);
+	return tracepoint_probe_register_may_exist(tp, (void *)btp->bpf_func,
+						   prog);
 }
 
 int bpf_probe_register(struct bpf_raw_event_map *btp, struct bpf_prog *prog)

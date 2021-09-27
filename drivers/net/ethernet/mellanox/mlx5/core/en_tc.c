@@ -67,6 +67,7 @@
 #include "lib/geneve.h"
 #include "lib/fs_chains.h"
 #include "diag/en_tc_tracepoint.h"
+#include <asm/div64.h>
 
 #define nic_chains(priv) ((priv)->fs.tc.chains)
 #define MLX5_MH_ACT_SZ MLX5_UN_SZ_BYTES(set_add_copy_action_in_auto)
@@ -480,12 +481,32 @@ static void mlx5e_detach_mod_hdr(struct mlx5e_priv *priv,
 static
 struct mlx5_core_dev *mlx5e_hairpin_get_mdev(struct net *net, int ifindex)
 {
+	struct mlx5_core_dev *mdev;
 	struct net_device *netdev;
 	struct mlx5e_priv *priv;
 
-	netdev = __dev_get_by_index(net, ifindex);
+	netdev = dev_get_by_index(net, ifindex);
+	if (!netdev)
+		return ERR_PTR(-ENODEV);
+
 	priv = netdev_priv(netdev);
-	return priv->mdev;
+	mdev = priv->mdev;
+	dev_put(netdev);
+
+	/* Mirred tc action holds a refcount on the ifindex net_device (see
+	 * net/sched/act_mirred.c:tcf_mirred_get_dev). So, it's okay to continue using mdev
+	 * after dev_put(netdev), while we're in the context of adding a tc flow.
+	 *
+	 * The mdev pointer corresponds to the peer/out net_device of a hairpin. It is then
+	 * stored in a hairpin object, which exists until all flows, that refer to it, get
+	 * removed.
+	 *
+	 * On the other hand, after a hairpin object has been created, the peer net_device may
+	 * be removed/unbound while there are still some hairpin flows that are using it. This
+	 * case is handled by mlx5e_tc_hairpin_update_dead_peer, which is hooked to
+	 * NETDEV_UNREGISTER event of the peer net_device.
+	 */
+	return mdev;
 }
 
 static int mlx5e_hairpin_create_transport(struct mlx5e_hairpin *hp)
@@ -684,6 +705,10 @@ mlx5e_hairpin_create(struct mlx5e_priv *priv, struct mlx5_hairpin_params *params
 
 	func_mdev = priv->mdev;
 	peer_mdev = mlx5e_hairpin_get_mdev(dev_net(priv->netdev), peer_ifindex);
+	if (IS_ERR(peer_mdev)) {
+		err = PTR_ERR(peer_mdev);
+		goto create_pair_err;
+	}
 
 	pair = mlx5_core_hairpin_create(func_mdev, peer_mdev, params);
 	if (IS_ERR(pair)) {
@@ -822,6 +847,11 @@ static int mlx5e_hairpin_flow_add(struct mlx5e_priv *priv,
 	int err;
 
 	peer_mdev = mlx5e_hairpin_get_mdev(dev_net(priv->netdev), peer_ifindex);
+	if (IS_ERR(peer_mdev)) {
+		NL_SET_ERR_MSG_MOD(extack, "invalid ifindex of mirred device");
+		return PTR_ERR(peer_mdev);
+	}
+
 	if (!MLX5_CAP_GEN(priv->mdev, hairpin) || !MLX5_CAP_GEN(peer_mdev, hairpin)) {
 		NL_SET_ERR_MSG_MOD(extack, "hairpin is not supported");
 		return -EOPNOTSUPP;
@@ -1164,6 +1194,9 @@ mlx5e_tc_offload_fdb_rules(struct mlx5_eswitch *esw,
 	struct mlx5e_tc_mod_hdr_acts *mod_hdr_acts;
 	struct mlx5_flow_handle *rule;
 
+	if (attr->flags & MLX5_ESW_ATTR_FLAG_SLOW_PATH)
+		return mlx5_eswitch_add_offloaded_rule(esw, spec, attr);
+
 	if (flow_flag_test(flow, CT)) {
 		mod_hdr_acts = &attr->parse_attr->mod_hdr_acts;
 
@@ -1194,6 +1227,9 @@ mlx5e_tc_unoffload_fdb_rules(struct mlx5_eswitch *esw,
 {
 	flow_flag_clear(flow, OFFLOADED);
 
+	if (attr->flags & MLX5_ESW_ATTR_FLAG_SLOW_PATH)
+		goto offload_rule_0;
+
 	if (flow_flag_test(flow, CT)) {
 		mlx5_tc_ct_delete_flow(get_ct_priv(flow->priv), flow, attr);
 		return;
@@ -1202,6 +1238,7 @@ mlx5e_tc_unoffload_fdb_rules(struct mlx5_eswitch *esw,
 	if (attr->esw_attr->split_count)
 		mlx5_eswitch_del_fwd_rule(esw, flow->rule[1], attr);
 
+offload_rule_0:
 	mlx5_eswitch_del_offloaded_rule(esw, flow->rule[0], attr);
 }
 
@@ -2188,6 +2225,9 @@ static int mlx5e_flower_parse_meta(struct net_device *filter_dev,
 		return 0;
 
 	flow_rule_match_meta(rule, &match);
+	if (!match.mask->ingress_ifindex)
+		return 0;
+
 	if (match.mask->ingress_ifindex != 0xFFFFFFFF) {
 		NL_SET_ERR_MSG_MOD(extack, "Unsupported ingress ifindex mask");
 		return -EOPNOTSUPP;
@@ -2242,11 +2282,13 @@ static int __parse_cls_flower(struct mlx5e_priv *priv,
 				    misc_parameters);
 	struct flow_rule *rule = flow_cls_offload_flow_rule(f);
 	struct flow_dissector *dissector = rule->match.dissector;
+	enum fs_flow_table_type fs_type;
 	u16 addr_type = 0;
 	u8 ip_proto = 0;
 	u8 *match_level;
 	int err;
 
+	fs_type = mlx5e_is_eswitch_flow(flow) ? FS_FT_FDB : FS_FT_NIC_RX;
 	match_level = outer_match_level;
 
 	if (dissector->used_keys &
@@ -2271,8 +2313,8 @@ static int __parse_cls_flower(struct mlx5e_priv *priv,
 	      BIT(FLOW_DISSECTOR_KEY_ENC_OPTS) |
 	      BIT(FLOW_DISSECTOR_KEY_MPLS))) {
 		NL_SET_ERR_MSG_MOD(extack, "Unsupported key");
-		netdev_warn(priv->netdev, "Unsupported key used: 0x%x\n",
-			    dissector->used_keys);
+		netdev_dbg(priv->netdev, "Unsupported key used: 0x%x\n",
+			   dissector->used_keys);
 		return -EOPNOTSUPP;
 	}
 
@@ -2371,6 +2413,13 @@ static int __parse_cls_flower(struct mlx5e_priv *priv,
 		if (match.mask->vlan_id ||
 		    match.mask->vlan_priority ||
 		    match.mask->vlan_tpid) {
+			if (!MLX5_CAP_FLOWTABLE_TYPE(priv->mdev, ft_field_support.outer_second_vid,
+						     fs_type)) {
+				NL_SET_ERR_MSG_MOD(extack,
+						   "Matching on CVLAN is not supported");
+				return -EOPNOTSUPP;
+			}
+
 			if (match.key->vlan_tpid == htons(ETH_P_8021AD)) {
 				MLX5_SET(fte_match_set_misc, misc_c,
 					 outer_second_svlan_tag, 1);
@@ -2587,6 +2636,16 @@ static int __parse_cls_flower(struct mlx5e_priv *priv,
 
 		if (match.mask->flags)
 			*match_level = MLX5_MATCH_L4;
+	}
+
+	/* Currenlty supported only for MPLS over UDP */
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_MPLS) &&
+	    !netif_is_bareudp(filter_dev)) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "Matching on MPLS is supported only for MPLS over UDP");
+		netdev_err(priv->netdev,
+			   "Matching on MPLS is supported only for MPLS over UDP\n");
+		return -EOPNOTSUPP;
 	}
 
 	return 0;
@@ -3192,6 +3251,37 @@ static int is_action_keys_supported(const struct flow_action_entry *act,
 	return 0;
 }
 
+static bool modify_tuple_supported(bool modify_tuple, bool ct_clear,
+				   bool ct_flow, struct netlink_ext_ack *extack,
+				   struct mlx5e_priv *priv,
+				   struct mlx5_flow_spec *spec)
+{
+	if (!modify_tuple || ct_clear)
+		return true;
+
+	if (ct_flow) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "can't offload tuple modification with non-clear ct()");
+		netdev_info(priv->netdev,
+			    "can't offload tuple modification with non-clear ct()");
+		return false;
+	}
+
+	/* Add ct_state=-trk match so it will be offloaded for non ct flows
+	 * (or after clear action), as otherwise, since the tuple is changed,
+	 * we can't restore ct state
+	 */
+	if (mlx5_tc_ct_add_no_trk_match(spec)) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "can't offload tuple modification with ct matches and no ct(clear) action");
+		netdev_info(priv->netdev,
+			    "can't offload tuple modification with ct matches and no ct(clear) action");
+		return false;
+	}
+
+	return true;
+}
+
 static bool modify_header_match_supported(struct mlx5e_priv *priv,
 					  struct mlx5_flow_spec *spec,
 					  struct flow_action *flow_action,
@@ -3230,18 +3320,9 @@ static bool modify_header_match_supported(struct mlx5e_priv *priv,
 			return err;
 	}
 
-	/* Add ct_state=-trk match so it will be offloaded for non ct flows
-	 * (or after clear action), as otherwise, since the tuple is changed,
-	 *  we can't restore ct state
-	 */
-	if (!ct_clear && modify_tuple &&
-	    mlx5_tc_ct_add_no_trk_match(spec)) {
-		NL_SET_ERR_MSG_MOD(extack,
-				   "can't offload tuple modify header with ct matches");
-		netdev_info(priv->netdev,
-			    "can't offload tuple modify header with ct matches");
+	if (!modify_tuple_supported(modify_tuple, ct_clear, ct_flow, extack,
+				    priv, spec))
 		return false;
-	}
 
 	ip_proto = MLX5_GET(fte_match_set_lyr_2_4, headers_v, ip_protocol);
 	if (modify_ip_header && ip_proto != IPPROTO_TCP &&
@@ -3982,8 +4063,12 @@ static int add_vlan_push_action(struct mlx5e_priv *priv,
 	if (err)
 		return err;
 
-	*out_dev = dev_get_by_index_rcu(dev_net(vlan_dev),
-					dev_get_iflink(vlan_dev));
+	rcu_read_lock();
+	*out_dev = dev_get_by_index_rcu(dev_net(vlan_dev), dev_get_iflink(vlan_dev));
+	rcu_read_unlock();
+	if (!*out_dev)
+		return -ENODEV;
+
 	if (is_vlan_dev(*out_dev))
 		err = add_vlan_push_action(priv, attr, out_dev, action);
 
@@ -5009,13 +5094,13 @@ errout:
 	return err;
 }
 
-static int apply_police_params(struct mlx5e_priv *priv, u32 rate,
+static int apply_police_params(struct mlx5e_priv *priv, u64 rate,
 			       struct netlink_ext_ack *extack)
 {
 	struct mlx5e_rep_priv *rpriv = priv->ppriv;
 	struct mlx5_eswitch *esw;
+	u32 rate_mbps = 0;
 	u16 vport_num;
-	u32 rate_mbps;
 	int err;
 
 	vport_num = rpriv->rep->vport;
@@ -5032,7 +5117,11 @@ static int apply_police_params(struct mlx5e_priv *priv, u32 rate,
 	 * Moreover, if rate is non zero we choose to configure to a minimum of
 	 * 1 mbit/sec.
 	 */
-	rate_mbps = rate ? max_t(u32, (rate * 8 + 500000) / 1000000, 1) : 0;
+	if (rate) {
+		rate = (rate * BITS_PER_BYTE) + 500000;
+		rate_mbps = max_t(u32, do_div(rate, 1000000), 1);
+	}
+
 	err = mlx5_esw_modify_vport_rate(esw, vport_num, rate_mbps);
 	if (err)
 		NL_SET_ERR_MSG_MOD(extack, "failed applying action to hardware");
@@ -5146,7 +5235,7 @@ static void mlx5e_tc_hairpin_update_dead_peer(struct mlx5e_priv *priv,
 	list_for_each_entry_safe(hpe, tmp, &init_wait_list, dead_peer_wait_list) {
 		wait_for_completion(&hpe->res_ready);
 		if (!IS_ERR_OR_NULL(hpe->hp) && hpe->peer_vhca_id == peer_vhca_id)
-			hpe->hp->pair->peer_gone = true;
+			mlx5_core_hairpin_clear_dead_peer(hpe->hp->pair);
 
 		mlx5e_hairpin_put(priv, hpe);
 	}
@@ -5443,7 +5532,7 @@ bool mlx5e_tc_update_skb(struct mlx5_cqe64 *cqe,
 	}
 
 	if (chain) {
-		tc_skb_ext = skb_ext_add(skb, TC_SKB_EXT);
+		tc_skb_ext = tc_skb_ext_alloc(skb);
 		if (WARN_ON(!tc_skb_ext))
 			return false;
 

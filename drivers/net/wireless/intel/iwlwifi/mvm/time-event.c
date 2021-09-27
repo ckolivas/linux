@@ -345,6 +345,8 @@ static void iwl_mvm_te_handle_notif(struct iwl_mvm *mvm,
 			 * and know the dtim period.
 			 */
 			iwl_mvm_te_check_disconnect(mvm, te_data->vif,
+				!te_data->vif->bss_conf.assoc ?
+				"Not associated and the time event is over already..." :
 				"No beacon heard and the time event is over already...");
 			break;
 		default:
@@ -843,6 +845,8 @@ void iwl_mvm_rx_session_protect_notif(struct iwl_mvm *mvm,
 			 * and know the dtim period.
 			 */
 			iwl_mvm_te_check_disconnect(mvm, vif,
+						    !vif->bss_conf.assoc ?
+						    "Not associated and the session protection is over already..." :
 						    "No beacon heard and the session protection is over already...");
 			spin_lock_bh(&mvm->time_event_lock);
 			iwl_mvm_te_clear_data(mvm, te_data);
@@ -1054,9 +1058,6 @@ void iwl_mvm_remove_csa_period(struct iwl_mvm *mvm,
 	u32 id;
 
 	lockdep_assert_held(&mvm->mutex);
-
-	if (!te_data->running)
-		return;
 
 	spin_lock_bh(&mvm->time_event_lock);
 	id = te_data->id;

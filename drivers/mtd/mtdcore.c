@@ -820,6 +820,9 @@ int mtd_device_parse_register(struct mtd_info *mtd, const char * const *types,
 
 	/* Prefer parsed partitions over driver-provided fallback */
 	ret = parse_mtd_partitions(mtd, types, parser_data);
+	if (ret == -EPROBE_DEFER)
+		goto out;
+
 	if (ret > 0)
 		ret = 0;
 	else if (nr_parts)
@@ -993,6 +996,8 @@ int __get_mtd_device(struct mtd_info *mtd)
 		}
 	}
 
+	master->usecount++;
+
 	while (mtd->parent) {
 		mtd->usecount++;
 		mtd = mtd->parent;
@@ -1058,6 +1063,8 @@ void __put_mtd_device(struct mtd_info *mtd)
 		BUG_ON(mtd->usecount < 0);
 		mtd = mtd->parent;
 	}
+
+	master->usecount--;
 
 	if (master->_put_device)
 		master->_put_device(master);

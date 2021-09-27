@@ -511,6 +511,9 @@ struct spi_controller {
 
 #define SPI_MASTER_GPIO_SS		BIT(5)	/* GPIO CS must select slave */
 
+	/* flag indicating this is a non-devres managed controller */
+	bool			devm_allocated;
+
 	/* flag indicating this is an SPI slave controller */
 	bool			slave;
 
@@ -643,8 +646,8 @@ struct spi_controller {
 	int			*cs_gpios;
 	struct gpio_desc	**cs_gpiods;
 	bool			use_gpio_descriptors;
-	u8			unused_native_cs;
-	u8			max_native_cs;
+	s8			unused_native_cs;
+	s8			max_native_cs;
 
 	/* statistics */
 	struct spi_statistics	statistics;

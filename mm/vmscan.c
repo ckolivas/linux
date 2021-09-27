@@ -102,9 +102,12 @@ struct scan_control {
 	unsigned int may_swap:1;
 
 	/*
-	 * Cgroups are not reclaimed below their configured memory.low,
-	 * unless we threaten to OOM. If any cgroups are skipped due to
-	 * memory.low and nothing was reclaimed, go back for memory.low.
+	 * Cgroup memory below memory.low is protected as long as we
+	 * don't threaten to OOM. If any cgroup is reclaimed at
+	 * reduced force or passed over entirely due to its memory.low
+	 * setting (memcg_low_skipped), and nothing is reclaimed as a
+	 * result, then go back for one more cycle that reclaims the protected
+	 * memory (memcg_low_reclaim) to avert OOM.
 	 */
 	unsigned int memcg_low_reclaim:1;
 	unsigned int memcg_low_skipped:1;
@@ -1072,7 +1075,6 @@ static void page_check_dirty_writeback(struct page *page,
 static unsigned int shrink_page_list(struct list_head *page_list,
 				     struct pglist_data *pgdat,
 				     struct scan_control *sc,
-				     enum ttu_flags ttu_flags,
 				     struct reclaim_stat *stat,
 				     bool ignore_references)
 {
@@ -1241,6 +1243,8 @@ static unsigned int shrink_page_list(struct list_head *page_list,
 			if (!PageSwapCache(page)) {
 				if (!(sc->gfp_mask & __GFP_IO))
 					goto keep_locked;
+				if (page_maybe_dma_pinned(page))
+					goto keep_locked;
 				if (PageTransHuge(page)) {
 					/* cannot split THP, skip it */
 					if (!can_split_huge_page(page, NULL))
@@ -1297,7 +1301,7 @@ static unsigned int shrink_page_list(struct list_head *page_list,
 		 * processes. Try to unmap it here.
 		 */
 		if (page_mapped(page)) {
-			enum ttu_flags flags = ttu_flags | TTU_BATCH_FLUSH;
+			enum ttu_flags flags = TTU_BATCH_FLUSH;
 			bool was_swapbacked = PageSwapBacked(page);
 
 			if (unlikely(PageTransHuge(page)))
@@ -1514,7 +1518,7 @@ unsigned int reclaim_clean_pages_from_list(struct zone *zone,
 	}
 
 	nr_reclaimed = shrink_page_list(&clean_pages, zone->zone_pgdat, &sc,
-			TTU_IGNORE_ACCESS, &stat, true);
+					&stat, true);
 	list_splice(&clean_pages, page_list);
 	mod_node_page_state(zone->zone_pgdat, NR_ISOLATED_FILE,
 			    -(long)nr_reclaimed);
@@ -1958,8 +1962,7 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 	if (nr_taken == 0)
 		return 0;
 
-	nr_reclaimed = shrink_page_list(&page_list, pgdat, sc, 0,
-				&stat, false);
+	nr_reclaimed = shrink_page_list(&page_list, pgdat, sc, &stat, false);
 
 	spin_lock_irq(&pgdat->lru_lock);
 
@@ -2131,8 +2134,7 @@ unsigned long reclaim_pages(struct list_head *page_list)
 
 		nr_reclaimed += shrink_page_list(&node_page_list,
 						NODE_DATA(nid),
-						&sc, 0,
-						&dummy_stat, false);
+						&sc, &dummy_stat, false);
 		while (!list_empty(&node_page_list)) {
 			page = lru_to_page(&node_page_list);
 			list_del(&page->lru);
@@ -2145,8 +2147,7 @@ unsigned long reclaim_pages(struct list_head *page_list)
 	if (!list_empty(&node_page_list)) {
 		nr_reclaimed += shrink_page_list(&node_page_list,
 						NODE_DATA(nid),
-						&sc, 0,
-						&dummy_stat, false);
+						&sc, &dummy_stat, false);
 		while (!list_empty(&node_page_list)) {
 			page = lru_to_page(&node_page_list);
 			list_del(&page->lru);
@@ -2325,15 +2326,14 @@ out:
 	for_each_evictable_lru(lru) {
 		int file = is_file_lru(lru);
 		unsigned long lruvec_size;
+		unsigned long low, min;
 		unsigned long scan;
-		unsigned long protection;
 
 		lruvec_size = lruvec_lru_size(lruvec, lru, sc->reclaim_idx);
-		protection = mem_cgroup_protection(sc->target_mem_cgroup,
-						   memcg,
-						   sc->memcg_low_reclaim);
+		mem_cgroup_protection(sc->target_mem_cgroup, memcg,
+				      &min, &low);
 
-		if (protection) {
+		if (min || low) {
 			/*
 			 * Scale a cgroup's reclaim pressure by proportioning
 			 * its current usage to its memory.low or memory.min
@@ -2364,12 +2364,21 @@ out:
 			 * hard protection.
 			 */
 			unsigned long cgroup_size = mem_cgroup_size(memcg);
+			unsigned long protection;
+
+			/* memory.low scaling, make sure we retry before OOM */
+			if (!sc->memcg_low_reclaim && low > min) {
+				protection = low;
+				sc->memcg_low_skipped = 1;
+			} else {
+				protection = min;
+			}
 
 			/* Avoid TOCTOU with earlier protection check */
 			cgroup_size = max(cgroup_size, protection);
 
 			scan = lruvec_size - lruvec_size * protection /
-				cgroup_size;
+				(cgroup_size + 1);
 
 			/*
 			 * Minimally target SWAP_CLUSTER_MAX pages to keep
@@ -4086,8 +4095,13 @@ module_init(kswapd_init)
  */
 int node_reclaim_mode __read_mostly;
 
-#define RECLAIM_WRITE (1<<0)	/* Writeout pages during reclaim */
-#define RECLAIM_UNMAP (1<<1)	/* Unmap pages during reclaim */
+/*
+ * These bit locations are exposed in the vm.zone_reclaim_mode sysctl
+ * ABI.  New bits are OK, but existing bits can never change.
+ */
+#define RECLAIM_ZONE  (1<<0)   /* Run shrink_inactive_list on the zone */
+#define RECLAIM_WRITE (1<<1)   /* Writeout pages during reclaim */
+#define RECLAIM_UNMAP (1<<2)   /* Unmap pages during reclaim */
 
 /*
  * Priority for NODE_RECLAIM. This determines the fraction of pages

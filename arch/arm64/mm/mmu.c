@@ -40,7 +40,7 @@
 #define NO_BLOCK_MAPPINGS	BIT(0)
 #define NO_CONT_MAPPINGS	BIT(1)
 
-u64 idmap_t0sz = TCR_T0SZ(VA_BITS);
+u64 idmap_t0sz = TCR_T0SZ(VA_BITS_MIN);
 u64 idmap_ptrs_per_pgd = PTRS_PER_PGD;
 
 u64 __section(".mmuoff.data.write") vabits_actual;
@@ -469,6 +469,21 @@ void __init mark_linear_text_alias_ro(void)
 			    PAGE_KERNEL_RO);
 }
 
+static bool crash_mem_map __initdata;
+
+static int __init enable_crash_mem_map(char *arg)
+{
+	/*
+	 * Proper parameter parsing is done by reserve_crashkernel(). We only
+	 * need to know if the linear map has to avoid block mappings so that
+	 * the crashkernel reservations can be unmapped later.
+	 */
+	crash_mem_map = true;
+
+	return 0;
+}
+early_param("crashkernel", enable_crash_mem_map);
+
 static void __init map_mem(pgd_t *pgdp)
 {
 	phys_addr_t kernel_start = __pa_symbol(_text);
@@ -477,7 +492,7 @@ static void __init map_mem(pgd_t *pgdp)
 	int flags = 0;
 	u64 i;
 
-	if (rodata_full || debug_pagealloc_enabled())
+	if (rodata_full || crash_mem_map || debug_pagealloc_enabled())
 		flags = NO_BLOCK_MAPPINGS | NO_CONT_MAPPINGS;
 
 	/*
@@ -487,11 +502,6 @@ static void __init map_mem(pgd_t *pgdp)
 	 * the following for-loop
 	 */
 	memblock_mark_nomap(kernel_start, kernel_end - kernel_start);
-#ifdef CONFIG_KEXEC_CORE
-	if (crashk_res.end)
-		memblock_mark_nomap(crashk_res.start,
-				    resource_size(&crashk_res));
-#endif
 
 	/* map all the memory banks */
 	for_each_mem_range(i, &start, &end) {
@@ -502,7 +512,8 @@ static void __init map_mem(pgd_t *pgdp)
 		 * if MTE is present. Otherwise, it has the same attributes as
 		 * PAGE_KERNEL.
 		 */
-		__map_memblock(pgdp, start, end, PAGE_KERNEL_TAGGED, flags);
+		__map_memblock(pgdp, start, end, pgprot_tagged(PAGE_KERNEL),
+			       flags);
 	}
 
 	/*
@@ -518,21 +529,6 @@ static void __init map_mem(pgd_t *pgdp)
 	__map_memblock(pgdp, kernel_start, kernel_end,
 		       PAGE_KERNEL, NO_CONT_MAPPINGS);
 	memblock_clear_nomap(kernel_start, kernel_end - kernel_start);
-
-#ifdef CONFIG_KEXEC_CORE
-	/*
-	 * Use page-level mappings here so that we can shrink the region
-	 * in page granularity and put back unused memory to buddy system
-	 * through /sys/kernel/kexec_crash_size interface.
-	 */
-	if (crashk_res.end) {
-		__map_memblock(pgdp, crashk_res.start, crashk_res.end + 1,
-			       PAGE_KERNEL,
-			       NO_BLOCK_MAPPINGS | NO_CONT_MAPPINGS);
-		memblock_clear_nomap(crashk_res.start,
-				     resource_size(&crashk_res));
-	}
-#endif
 }
 
 void mark_rodata_ro(void)
@@ -1446,14 +1442,30 @@ static void __remove_pgd_mapping(pgd_t *pgdir, unsigned long start, u64 size)
 
 static bool inside_linear_region(u64 start, u64 size)
 {
+	u64 start_linear_pa = __pa(_PAGE_OFFSET(vabits_actual));
+	u64 end_linear_pa = __pa(PAGE_END - 1);
+
+	if (IS_ENABLED(CONFIG_RANDOMIZE_BASE)) {
+		/*
+		 * Check for a wrap, it is possible because of randomized linear
+		 * mapping the start physical address is actually bigger than
+		 * the end physical address. In this case set start to zero
+		 * because [0, end_linear_pa] range must still be able to cover
+		 * all addressable physical addresses.
+		 */
+		if (start_linear_pa > end_linear_pa)
+			start_linear_pa = 0;
+	}
+
+	WARN_ON(start_linear_pa > end_linear_pa);
+
 	/*
 	 * Linear mapping region is the range [PAGE_OFFSET..(PAGE_END - 1)]
 	 * accommodating both its ends but excluding PAGE_END. Max physical
 	 * range which can be mapped inside this linear mapping range, must
 	 * also be derived from its end points.
 	 */
-	return start >= __pa(_PAGE_OFFSET(vabits_actual)) &&
-	       (start + size - 1) <= __pa(PAGE_END - 1);
+	return start >= start_linear_pa && (start + size - 1) <= end_linear_pa;
 }
 
 int arch_add_memory(int nid, u64 start, u64 size,

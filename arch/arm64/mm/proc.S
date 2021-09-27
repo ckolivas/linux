@@ -168,7 +168,7 @@ SYM_FUNC_END(cpu_do_resume)
 	.pushsection ".idmap.text", "awx"
 
 .macro	__idmap_cpu_set_reserved_ttbr1, tmp1, tmp2
-	adrp	\tmp1, empty_zero_page
+	adrp	\tmp1, reserved_pg_dir
 	phys_to_ttbr \tmp2, \tmp1
 	offset_ttbr1 \tmp2, \tmp1
 	msr	ttbr1_el1, \tmp2
@@ -443,6 +443,18 @@ SYM_FUNC_START(__cpu_setup)
 	/* initialize GCR_EL1: all non-zero tags excluded by default */
 	mov	x10, #(SYS_GCR_EL1_RRND | SYS_GCR_EL1_EXCL_MASK)
 	msr_s	SYS_GCR_EL1, x10
+
+	/*
+	 * If GCR_EL1.RRND=1 is implemented the same way as RRND=0, then
+	 * RGSR_EL1.SEED must be non-zero for IRG to produce
+	 * pseudorandom numbers. As RGSR_EL1 is UNKNOWN out of reset, we
+	 * must initialize it.
+	 */
+	mrs	x10, CNTVCT_EL0
+	ands	x10, x10, #SYS_RGSR_EL1_SEED_MASK
+	csinc	x10, x10, xzr, ne
+	lsl	x10, x10, #SYS_RGSR_EL1_SEED_SHIFT
+	msr_s	SYS_RGSR_EL1, x10
 
 	/* clear any pending tag check faults in TFSR*_EL1 */
 	msr_s	SYS_TFSR_EL1, xzr

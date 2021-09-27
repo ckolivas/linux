@@ -305,8 +305,7 @@ struct etnaviv_vram_mapping *etnaviv_gem_mapping_get(
 		list_del(&mapping->obj_node);
 	}
 
-	etnaviv_iommu_context_get(mmu_context);
-	mapping->context = mmu_context;
+	mapping->context = etnaviv_iommu_context_get(mmu_context);
 	mapping->use = 1;
 
 	ret = etnaviv_iommu_map_gem(mmu_context, etnaviv_obj,
@@ -675,7 +674,7 @@ static int etnaviv_gem_userptr_get_pages(struct etnaviv_gem_object *etnaviv_obj)
 		struct page **pages = pvec + pinned;
 
 		ret = pin_user_pages_fast(ptr, num_pages,
-					  !userptr->ro ? FOLL_WRITE : 0, pages);
+					  FOLL_WRITE | FOLL_FORCE, pages);
 		if (ret < 0) {
 			unpin_user_pages(pvec, pinned);
 			kvfree(pvec);

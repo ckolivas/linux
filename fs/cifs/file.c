@@ -164,6 +164,7 @@ int cifs_posix_open(char *full_path, struct inode **pinode,
 			goto posix_open_ret;
 		}
 	} else {
+		cifs_revalidate_mapping(*pinode);
 		cifs_fattr_to_inode(*pinode, &fattr);
 	}
 
@@ -4549,7 +4550,7 @@ read_complete:
 
 static int cifs_readpage(struct file *file, struct page *page)
 {
-	loff_t offset = (loff_t)page->index << PAGE_SHIFT;
+	loff_t offset = page_file_offset(page);
 	int rc = -EACCES;
 	unsigned int xid;
 

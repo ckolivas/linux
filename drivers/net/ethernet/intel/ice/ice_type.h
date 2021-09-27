@@ -63,7 +63,7 @@ enum ice_aq_res_ids {
 /* FW update timeout definitions are in milliseconds */
 #define ICE_NVM_TIMEOUT			180000
 #define ICE_CHANGE_LOCK_TIMEOUT		1000
-#define ICE_GLOBAL_CFG_LOCK_TIMEOUT	3000
+#define ICE_GLOBAL_CFG_LOCK_TIMEOUT	5000
 
 enum ice_aq_res_access_type {
 	ICE_RES_READ = 1,
@@ -493,6 +493,7 @@ struct ice_dcb_app_priority_table {
 #define ICE_TLV_STATUS_ERR	0x4
 #define ICE_APP_PROT_ID_FCOE	0x8906
 #define ICE_APP_PROT_ID_ISCSI	0x0cbc
+#define ICE_APP_PROT_ID_ISCSI_860 0x035c
 #define ICE_APP_PROT_ID_FIP	0x8914
 #define ICE_APP_SEL_ETHTYPE	0x1
 #define ICE_APP_SEL_TCPIP	0x2
@@ -512,6 +513,14 @@ struct ice_dcbx_cfg {
 #define ICE_DCBX_MODE_IEEE	0x2
 	u8 app_mode;
 #define ICE_DCBX_APPS_NON_WILLING	0x1
+};
+
+struct ice_qos_cfg {
+	struct ice_dcbx_cfg local_dcbx_cfg;	/* Oper/Local Cfg */
+	struct ice_dcbx_cfg desired_dcbx_cfg;	/* CEE Desired Cfg */
+	struct ice_dcbx_cfg remote_dcbx_cfg;	/* Peer Cfg */
+	u8 dcbx_status : 3;			/* see ICE_DCBX_STATUS_DIS */
+	u8 is_sw_lldp : 1;
 };
 
 struct ice_port_info {
@@ -537,13 +546,7 @@ struct ice_port_info {
 		sib_head[ICE_MAX_TRAFFIC_CLASS][ICE_AQC_TOPO_MAX_LEVEL_NUM];
 	/* List contain profile ID(s) and other params per layer */
 	struct list_head rl_prof_list[ICE_AQC_TOPO_MAX_LEVEL_NUM];
-	struct ice_dcbx_cfg local_dcbx_cfg;	/* Oper/Local Cfg */
-	/* DCBX info */
-	struct ice_dcbx_cfg remote_dcbx_cfg;	/* Peer Cfg */
-	struct ice_dcbx_cfg desired_dcbx_cfg;	/* CEE Desired Cfg */
-	/* LLDP/DCBX Status */
-	u8 dcbx_status:3;		/* see ICE_DCBX_STATUS_DIS */
-	u8 is_sw_lldp:1;
+	struct ice_qos_cfg qos_cfg;
 	u8 is_vf:1;
 };
 

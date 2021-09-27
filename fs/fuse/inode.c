@@ -132,7 +132,7 @@ static void fuse_evict_inode(struct inode *inode)
 			fi->forget = NULL;
 		}
 	}
-	if (S_ISREG(inode->i_mode) && !is_bad_inode(inode)) {
+	if (S_ISREG(inode->i_mode) && !fuse_is_bad(inode)) {
 		WARN_ON(!list_empty(&fi->write_files));
 		WARN_ON(!list_empty(&fi->queued_writes));
 	}
@@ -340,9 +340,9 @@ retry:
 		inode->i_generation = generation;
 		fuse_init_inode(inode, attr);
 		unlock_new_inode(inode);
-	} else if ((inode->i_mode ^ attr->mode) & S_IFMT) {
-		/* Inode has changed type, any I/O on the old should fail */
-		make_bad_inode(inode);
+	} else if (fuse_stale_inode(inode, generation, attr)) {
+		/* nodeid was reused, any I/O on the old inode should fail */
+		fuse_make_bad(inode);
 		iput(inode);
 		goto retry;
 	}

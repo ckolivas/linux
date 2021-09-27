@@ -181,7 +181,7 @@ static int clp_store_query_pci_fn(struct zpci_dev *zdev,
 	return 0;
 }
 
-static int clp_query_pci_fn(struct zpci_dev *zdev, u32 fh)
+int clp_query_pci_fn(struct zpci_dev *zdev)
 {
 	struct clp_req_rsp_query_pci *rrb;
 	int rc;
@@ -194,7 +194,7 @@ static int clp_query_pci_fn(struct zpci_dev *zdev, u32 fh)
 	rrb->request.hdr.len = sizeof(rrb->request);
 	rrb->request.hdr.cmd = CLP_QUERY_PCI_FN;
 	rrb->response.hdr.len = sizeof(rrb->response);
-	rrb->request.fh = fh;
+	rrb->request.fh = zdev->fh;
 
 	rc = clp_req(rrb, CLP_LPS_PCI);
 	if (!rc && rrb->response.hdr.rsp == CLP_RC_OK) {
@@ -212,50 +212,20 @@ out:
 	return rc;
 }
 
-int clp_add_pci_device(u32 fid, u32 fh, int configured)
-{
-	struct zpci_dev *zdev;
-	int rc = -ENOMEM;
-
-	zpci_dbg(3, "add fid:%x, fh:%x, c:%d\n", fid, fh, configured);
-	zdev = kzalloc(sizeof(*zdev), GFP_KERNEL);
-	if (!zdev)
-		goto error;
-
-	zdev->fh = fh;
-	zdev->fid = fid;
-
-	/* Query function properties and update zdev */
-	rc = clp_query_pci_fn(zdev, fh);
-	if (rc)
-		goto error;
-
-	if (configured)
-		zdev->state = ZPCI_FN_STATE_CONFIGURED;
-	else
-		zdev->state = ZPCI_FN_STATE_STANDBY;
-
-	rc = zpci_create_device(zdev);
-	if (rc)
-		goto error;
-	return 0;
-
-error:
-	zpci_dbg(0, "add fid:%x, rc:%d\n", fid, rc);
-	kfree(zdev);
-	return rc;
-}
-
 static int clp_refresh_fh(u32 fid);
-/*
- * Enable/Disable a given PCI function and update its function handle if
- * necessary
+/**
+ * clp_set_pci_fn() - Execute a command on a PCI function
+ * @zdev: Function that will be affected
+ * @nr_dma_as: DMA address space number
+ * @command: The command code to execute
+ *
+ * Returns: 0 on success, < 0 for Linux errors (e.g. -ENOMEM), and
+ * > 0 for non-success platform responses
  */
 static int clp_set_pci_fn(struct zpci_dev *zdev, u8 nr_dma_as, u8 command)
 {
 	struct clp_req_rsp_set_pci *rrb;
 	int rc, retries = 100;
-	u32 fid = zdev->fid;
 
 	rrb = clp_alloc_block(GFP_KERNEL);
 	if (!rrb)
@@ -279,17 +249,16 @@ static int clp_set_pci_fn(struct zpci_dev *zdev, u8 nr_dma_as, u8 command)
 		}
 	} while (rrb->response.hdr.rsp == CLP_RC_SETPCIFN_BUSY);
 
-	if (rc || rrb->response.hdr.rsp != CLP_RC_OK) {
-		zpci_err("Set PCI FN:\n");
-		zpci_err_clp(rrb->response.hdr.rsp, rc);
-	}
-
 	if (!rc && rrb->response.hdr.rsp == CLP_RC_OK) {
 		zdev->fh = rrb->response.fh;
-	} else if (!rc && rrb->response.hdr.rsp == CLP_RC_SETPCIFN_ALRDY &&
-			rrb->response.fh == 0) {
+	} else if (!rc && rrb->response.hdr.rsp == CLP_RC_SETPCIFN_ALRDY) {
 		/* Function is already in desired state - update handle */
-		rc = clp_refresh_fh(fid);
+		rc = clp_refresh_fh(zdev->fid);
+	} else {
+		zpci_err("Set PCI FN:\n");
+		zpci_err_clp(rrb->response.hdr.rsp, rc);
+		if (!rc)
+			rc = rrb->response.hdr.rsp;
 	}
 	clp_free_block(rrb);
 	return rc;
@@ -335,17 +304,13 @@ int clp_enable_fh(struct zpci_dev *zdev, u8 nr_dma_as)
 
 	rc = clp_set_pci_fn(zdev, nr_dma_as, CLP_SET_ENABLE_PCI_FN);
 	zpci_dbg(3, "ena fid:%x, fh:%x, rc:%d\n", zdev->fid, zdev->fh, rc);
-	if (rc)
-		goto out;
-
-	if (zpci_use_mio(zdev)) {
+	if (!rc && zpci_use_mio(zdev)) {
 		rc = clp_set_pci_fn(zdev, nr_dma_as, CLP_SET_ENABLE_MIO);
 		zpci_dbg(3, "ena mio fid:%x, fh:%x, rc:%d\n",
 				zdev->fid, zdev->fh, rc);
 		if (rc)
 			clp_disable_fh(zdev);
 	}
-out:
 	return rc;
 }
 
@@ -408,7 +373,7 @@ static void __clp_add(struct clp_fh_list_entry *entry, void *data)
 
 	zdev = get_zdev_by_fid(entry->fid);
 	if (!zdev)
-		clp_add_pci_device(entry->fid, entry->fh, entry->config_state);
+		zpci_create_device(entry->fid, entry->fh, entry->config_state);
 }
 
 int clp_scan_pci_devices(void)

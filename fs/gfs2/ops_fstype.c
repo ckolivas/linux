@@ -660,6 +660,7 @@ static int init_statfs(struct gfs2_sbd *sdp)
 			error = PTR_ERR(lsi->si_sc_inode);
 			fs_err(sdp, "can't find local \"sc\" file#%u: %d\n",
 			       jd->jd_jid, error);
+			kfree(lsi);
 			goto free_local;
 		}
 		lsi->si_jid = jd->jd_jid;
@@ -670,6 +671,7 @@ static int init_statfs(struct gfs2_sbd *sdp)
 	}
 
 	iput(pn);
+	pn = NULL;
 	ip = GFS2_I(sdp->sd_sc_inode);
 	error = gfs2_glock_nq_init(ip->i_gl, LM_ST_EXCLUSIVE, 0,
 				   &sdp->sd_sc_gh);
@@ -1070,6 +1072,34 @@ void gfs2_online_uevent(struct gfs2_sbd *sdp)
 	kobject_uevent_env(&sdp->sd_kobj, KOBJ_ONLINE, envp);
 }
 
+static int init_threads(struct gfs2_sbd *sdp)
+{
+	struct task_struct *p;
+	int error = 0;
+
+	p = kthread_run(gfs2_logd, sdp, "gfs2_logd");
+	if (IS_ERR(p)) {
+		error = PTR_ERR(p);
+		fs_err(sdp, "can't start logd thread: %d\n", error);
+		return error;
+	}
+	sdp->sd_logd_process = p;
+
+	p = kthread_run(gfs2_quotad, sdp, "gfs2_quotad");
+	if (IS_ERR(p)) {
+		error = PTR_ERR(p);
+		fs_err(sdp, "can't start quotad thread: %d\n", error);
+		goto fail;
+	}
+	sdp->sd_quotad_process = p;
+	return 0;
+
+fail:
+	kthread_stop(sdp->sd_logd_process);
+	sdp->sd_logd_process = NULL;
+	return error;
+}
+
 /**
  * gfs2_fill_super - Read in superblock
  * @sb: The VFS superblock
@@ -1084,6 +1114,7 @@ static int gfs2_fill_super(struct super_block *sb, struct fs_context *fc)
 	int silent = fc->sb_flags & SB_SILENT;
 	struct gfs2_sbd *sdp;
 	struct gfs2_holder mount_gh;
+	struct gfs2_holder freeze_gh;
 	int error;
 
 	sdp = init_sbd(sb);
@@ -1195,25 +1226,32 @@ static int gfs2_fill_super(struct super_block *sb, struct fs_context *fc)
 		goto fail_per_node;
 	}
 
-	if (sb_rdonly(sb)) {
-		struct gfs2_holder freeze_gh;
-
-		error = gfs2_glock_nq_init(sdp->sd_freeze_gl, LM_ST_SHARED,
-					   LM_FLAG_NOEXP | GL_EXACT,
-					   &freeze_gh);
+	if (!sb_rdonly(sb)) {
+		error = init_threads(sdp);
 		if (error) {
-			fs_err(sdp, "can't make FS RO: %d\n", error);
-			goto fail_per_node;
-		}
-		gfs2_glock_dq_uninit(&freeze_gh);
-	} else {
-		error = gfs2_make_fs_rw(sdp);
-		if (error) {
-			fs_err(sdp, "can't make FS RW: %d\n", error);
+			gfs2_withdraw_delayed(sdp);
 			goto fail_per_node;
 		}
 	}
 
+	error = gfs2_freeze_lock(sdp, &freeze_gh, 0);
+	if (error)
+		goto fail_per_node;
+
+	if (!sb_rdonly(sb))
+		error = gfs2_make_fs_rw(sdp);
+
+	gfs2_freeze_unlock(&freeze_gh);
+	if (error) {
+		if (sdp->sd_quotad_process)
+			kthread_stop(sdp->sd_quotad_process);
+		sdp->sd_quotad_process = NULL;
+		if (sdp->sd_logd_process)
+			kthread_stop(sdp->sd_logd_process);
+		sdp->sd_logd_process = NULL;
+		fs_err(sdp, "can't make FS RW: %d\n", error);
+		goto fail_per_node;
+	}
 	gfs2_glock_dq_uninit(&mount_gh);
 	gfs2_online_uevent(sdp);
 	return 0;
@@ -1514,6 +1552,12 @@ static int gfs2_reconfigure(struct fs_context *fc)
 		fc->sb_flags |= SB_RDONLY;
 
 	if ((sb->s_flags ^ fc->sb_flags) & SB_RDONLY) {
+		struct gfs2_holder freeze_gh;
+
+		error = gfs2_freeze_lock(sdp, &freeze_gh, 0);
+		if (error)
+			return -EINVAL;
+
 		if (fc->sb_flags & SB_RDONLY) {
 			error = gfs2_make_fs_ro(sdp);
 			if (error)
@@ -1523,6 +1567,7 @@ static int gfs2_reconfigure(struct fs_context *fc)
 			if (error)
 				errorfc(fc, "unable to remount read-write");
 		}
+		gfs2_freeze_unlock(&freeze_gh);
 	}
 	sdp->sd_args = *newargs;
 

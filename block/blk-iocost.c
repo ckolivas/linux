@@ -1023,7 +1023,17 @@ static void __propagate_weights(struct ioc_gq *iocg, u32 active, u32 inuse,
 
 	lockdep_assert_held(&ioc->lock);
 
-	inuse = clamp_t(u32, inuse, 1, active);
+	/*
+	 * For an active leaf node, its inuse shouldn't be zero or exceed
+	 * @active. An active internal node's inuse is solely determined by the
+	 * inuse to active ratio of its children regardless of @inuse.
+	 */
+	if (list_empty(&iocg->active_list) && iocg->child_active_sum) {
+		inuse = DIV64_U64_ROUND_UP(active * iocg->child_inuse_sum,
+					   iocg->child_active_sum);
+	} else {
+		inuse = clamp_t(u32, inuse, 1, active);
+	}
 
 	iocg->last_inuse = iocg->inuse;
 	if (save)
@@ -1040,7 +1050,7 @@ static void __propagate_weights(struct ioc_gq *iocg, u32 active, u32 inuse,
 		/* update the level sums */
 		parent->child_active_sum += (s32)(active - child->active);
 		parent->child_inuse_sum += (s32)(inuse - child->inuse);
-		/* apply the udpates */
+		/* apply the updates */
 		child->active = active;
 		child->inuse = inuse;
 
@@ -1384,16 +1394,17 @@ static int iocg_wake_fn(struct wait_queue_entry *wq_entry, unsigned mode,
 		return -1;
 
 	iocg_commit_bio(ctx->iocg, wait->bio, wait->abs_cost, cost);
+	wait->committed = true;
 
 	/*
 	 * autoremove_wake_function() removes the wait entry only when it
-	 * actually changed the task state.  We want the wait always
-	 * removed.  Remove explicitly and use default_wake_function().
+	 * actually changed the task state. We want the wait always removed.
+	 * Remove explicitly and use default_wake_function(). Note that the
+	 * order of operations is important as finish_wait() tests whether
+	 * @wq_entry is removed without grabbing the lock.
 	 */
-	list_del_init(&wq_entry->entry);
-	wait->committed = true;
-
 	default_wake_function(wq_entry, mode, flags, key);
+	list_del_init_careful(&wq_entry->entry);
 	return 0;
 }
 
@@ -2525,8 +2536,8 @@ static void ioc_rqos_throttle(struct rq_qos *rqos, struct bio *bio)
 	bool use_debt, ioc_locked;
 	unsigned long flags;
 
-	/* bypass IOs if disabled or for root cgroup */
-	if (!ioc->enabled || !iocg->level)
+	/* bypass IOs if disabled, still initializing, or for root cgroup */
+	if (!ioc->enabled || !iocg || !iocg->level)
 		return;
 
 	/* calculate the absolute vtime cost */
@@ -2653,14 +2664,14 @@ static void ioc_rqos_merge(struct rq_qos *rqos, struct request *rq,
 			   struct bio *bio)
 {
 	struct ioc_gq *iocg = blkg_to_iocg(bio->bi_blkg);
-	struct ioc *ioc = iocg->ioc;
+	struct ioc *ioc = rqos_to_ioc(rqos);
 	sector_t bio_end = bio_end_sector(bio);
 	struct ioc_now now;
 	u64 vtime, abs_cost, cost;
 	unsigned long flags;
 
-	/* bypass if disabled or for root cgroup */
-	if (!ioc->enabled || !iocg->level)
+	/* bypass if disabled, still initializing, or for root cgroup */
+	if (!ioc->enabled || !iocg || !iocg->level)
 		return;
 
 	abs_cost = calc_vtime_cost(bio, iocg, true);
@@ -2837,6 +2848,12 @@ static int blk_iocost_init(struct request_queue *q)
 	ioc_refresh_params(ioc, true);
 	spin_unlock_irq(&ioc->lock);
 
+	/*
+	 * rqos must be added before activation to allow iocg_pd_init() to
+	 * lookup the ioc from q. This means that the rqos methods may get
+	 * called before policy activation completion, can't assume that the
+	 * target bio has an iocg associated and need to test for NULL iocg.
+	 */
 	rq_qos_add(q, rqos);
 	ret = blkcg_activate_policy(q, &blkcg_policy_iocost);
 	if (ret) {
@@ -3022,19 +3039,19 @@ static ssize_t ioc_weight_write(struct kernfs_open_file *of, char *buf,
 		if (v < CGROUP_WEIGHT_MIN || v > CGROUP_WEIGHT_MAX)
 			return -EINVAL;
 
-		spin_lock(&blkcg->lock);
+		spin_lock_irq(&blkcg->lock);
 		iocc->dfl_weight = v * WEIGHT_ONE;
 		hlist_for_each_entry(blkg, &blkcg->blkg_list, blkcg_node) {
 			struct ioc_gq *iocg = blkg_to_iocg(blkg);
 
 			if (iocg) {
-				spin_lock_irq(&iocg->ioc->lock);
+				spin_lock(&iocg->ioc->lock);
 				ioc_now(iocg->ioc, &now);
 				weight_updated(iocg, &now);
-				spin_unlock_irq(&iocg->ioc->lock);
+				spin_unlock(&iocg->ioc->lock);
 			}
 		}
-		spin_unlock(&blkcg->lock);
+		spin_unlock_irq(&blkcg->lock);
 
 		return nbytes;
 	}

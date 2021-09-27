@@ -583,6 +583,15 @@ DEFINE_IDTENTRY_RAW(xenpv_exc_debug)
 		exc_debug(regs);
 }
 
+DEFINE_IDTENTRY_RAW(exc_xen_unknown_trap)
+{
+	/* This should never happen and there is no way to handle it. */
+	instrumentation_begin();
+	pr_err("Unknown trap in Xen PV mode.");
+	BUG();
+	instrumentation_end();
+}
+
 struct trap_array_entry {
 	void (*orig)(void);
 	void (*xen)(void);
@@ -631,6 +640,7 @@ static bool __ref get_trap_addr(void **addr, unsigned int ist)
 {
 	unsigned int nr;
 	bool ist_okay = false;
+	bool found = false;
 
 	/*
 	 * Replace trap handler addresses by Xen specific ones.
@@ -645,6 +655,7 @@ static bool __ref get_trap_addr(void **addr, unsigned int ist)
 		if (*addr == entry->orig) {
 			*addr = entry->xen;
 			ist_okay = entry->ist_okay;
+			found = true;
 			break;
 		}
 	}
@@ -655,9 +666,13 @@ static bool __ref get_trap_addr(void **addr, unsigned int ist)
 		nr = (*addr - (void *)early_idt_handler_array[0]) /
 		     EARLY_IDT_HANDLER_SIZE;
 		*addr = (void *)xen_early_idt_handler_array[nr];
+		found = true;
 	}
 
-	if (WARN_ON(ist != 0 && !ist_okay))
+	if (!found)
+		*addr = (void *)xen_asm_exc_xen_unknown_trap;
+
+	if (WARN_ON(found && ist != 0 && !ist_okay))
 		return false;
 
 	return true;
@@ -1189,6 +1204,11 @@ static void __init xen_dom0_set_legacy_features(void)
 	x86_platform.legacy.rtc = 1;
 }
 
+static void __init xen_domu_set_legacy_features(void)
+{
+	x86_platform.legacy.rtc = 0;
+}
+
 /* First C function to be called on Xen boot */
 asmlinkage __visible void __init xen_start_kernel(void)
 {
@@ -1249,15 +1269,15 @@ asmlinkage __visible void __init xen_start_kernel(void)
 	/* Get mfn list */
 	xen_build_dynamic_phys_to_machine();
 
+	/* Work out if we support NX */
+	get_cpu_cap(&boot_cpu_data);
+	x86_configure_nx();
+
 	/*
 	 * Set up kernel GDT and segment registers, mainly so that
 	 * -fstack-protector code can be executed.
 	 */
 	xen_setup_gdt(0);
-
-	/* Work out if we support NX */
-	get_cpu_cap(&boot_cpu_data);
-	x86_configure_nx();
 
 	/* Determine virtual and physical address sizes */
 	get_cpu_address_sizes(&boot_cpu_data);
@@ -1341,6 +1361,8 @@ asmlinkage __visible void __init xen_start_kernel(void)
 		add_preferred_console("xenboot", 0, NULL);
 		if (pci_xen)
 			x86_init.pci.arch_init = pci_xen_init;
+		x86_platform.set_legacy_features =
+				xen_domu_set_legacy_features;
 	} else {
 		const struct dom0_vga_console_info *info =
 			(void *)((char *)xen_start_info +

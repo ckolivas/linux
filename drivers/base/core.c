@@ -83,6 +83,11 @@ int device_links_read_lock_held(void)
 {
 	return srcu_read_lock_held(&device_links_srcu);
 }
+
+static void device_link_synchronize_removal(void)
+{
+	synchronize_srcu(&device_links_srcu);
+}
 #else /* !CONFIG_SRCU */
 static DECLARE_RWSEM(device_links_lock);
 
@@ -113,7 +118,21 @@ int device_links_read_lock_held(void)
 	return lockdep_is_held(&device_links_lock);
 }
 #endif
+
+static inline void device_link_synchronize_removal(void)
+{
+}
 #endif /* !CONFIG_SRCU */
+
+static bool device_is_ancestor(struct device *dev, struct device *target)
+{
+	while (target->parent) {
+		target = target->parent;
+		if (dev == target)
+			return true;
+	}
+	return false;
+}
 
 /**
  * device_is_dependent - Check if one device depends on another one
@@ -128,7 +147,12 @@ int device_is_dependent(struct device *dev, void *target)
 	struct device_link *link;
 	int ret;
 
-	if (dev == target)
+	/*
+	 * The "ancestors" check is needed to catch the case when the target
+	 * device has not been completely initialized yet and it is still
+	 * missing from the list of children of its parent device.
+	 */
+	if (dev == target || device_is_ancestor(dev, target))
 		return 1;
 
 	ret = device_for_each_child(dev, target, device_is_dependent);
@@ -317,8 +341,13 @@ static struct attribute *devlink_attrs[] = {
 };
 ATTRIBUTE_GROUPS(devlink);
 
-static void device_link_free(struct device_link *link)
+static void device_link_release_fn(struct work_struct *work)
 {
+	struct device_link *link = container_of(work, struct device_link, rm_work);
+
+	/* Ensure that all references to the link object have been dropped. */
+	device_link_synchronize_removal();
+
 	while (refcount_dec_not_one(&link->rpm_active))
 		pm_runtime_put(link->supplier);
 
@@ -327,24 +356,19 @@ static void device_link_free(struct device_link *link)
 	kfree(link);
 }
 
-#ifdef CONFIG_SRCU
-static void __device_link_free_srcu(struct rcu_head *rhead)
-{
-	device_link_free(container_of(rhead, struct device_link, rcu_head));
-}
-
 static void devlink_dev_release(struct device *dev)
 {
 	struct device_link *link = to_devlink(dev);
 
-	call_srcu(&device_links_srcu, &link->rcu_head, __device_link_free_srcu);
+	INIT_WORK(&link->rm_work, device_link_release_fn);
+	/*
+	 * It may take a while to complete this work because of the SRCU
+	 * synchronization in device_link_release_fn() and if the consumer or
+	 * supplier devices get deleted when it runs, so put it into the "long"
+	 * workqueue.
+	 */
+	queue_work(system_long_wq, &link->rm_work);
 }
-#else
-static void devlink_dev_release(struct device *dev)
-{
-	device_link_free(to_devlink(dev));
-}
-#endif
 
 static struct class devlink_class = {
 	.name = "devlink",
@@ -363,7 +387,9 @@ static int devlink_add_symlinks(struct device *dev,
 	struct device *con = link->consumer;
 	char *buf;
 
-	len = max(strlen(dev_name(sup)), strlen(dev_name(con)));
+	len = max(strlen(dev_bus_name(sup)) + strlen(dev_name(sup)),
+		  strlen(dev_bus_name(con)) + strlen(dev_name(con)));
+	len += strlen(":");
 	len += strlen("supplier:") + 1;
 	buf = kzalloc(len, GFP_KERNEL);
 	if (!buf)
@@ -377,12 +403,12 @@ static int devlink_add_symlinks(struct device *dev,
 	if (ret)
 		goto err_con;
 
-	snprintf(buf, len, "consumer:%s", dev_name(con));
+	snprintf(buf, len, "consumer:%s:%s", dev_bus_name(con), dev_name(con));
 	ret = sysfs_create_link(&sup->kobj, &link->link_dev.kobj, buf);
 	if (ret)
 		goto err_con_dev;
 
-	snprintf(buf, len, "supplier:%s", dev_name(sup));
+	snprintf(buf, len, "supplier:%s:%s", dev_bus_name(sup), dev_name(sup));
 	ret = sysfs_create_link(&con->kobj, &link->link_dev.kobj, buf);
 	if (ret)
 		goto err_sup_dev;
@@ -390,7 +416,7 @@ static int devlink_add_symlinks(struct device *dev,
 	goto out;
 
 err_sup_dev:
-	snprintf(buf, len, "consumer:%s", dev_name(con));
+	snprintf(buf, len, "consumer:%s:%s", dev_bus_name(con), dev_name(con));
 	sysfs_remove_link(&sup->kobj, buf);
 err_con_dev:
 	sysfs_remove_link(&link->link_dev.kobj, "consumer");
@@ -413,7 +439,9 @@ static void devlink_remove_symlinks(struct device *dev,
 	sysfs_remove_link(&link->link_dev.kobj, "consumer");
 	sysfs_remove_link(&link->link_dev.kobj, "supplier");
 
-	len = max(strlen(dev_name(sup)), strlen(dev_name(con)));
+	len = max(strlen(dev_bus_name(sup)) + strlen(dev_name(sup)),
+		  strlen(dev_bus_name(con)) + strlen(dev_name(con)));
+	len += strlen(":");
 	len += strlen("supplier:") + 1;
 	buf = kzalloc(len, GFP_KERNEL);
 	if (!buf) {
@@ -421,9 +449,11 @@ static void devlink_remove_symlinks(struct device *dev,
 		return;
 	}
 
-	snprintf(buf, len, "supplier:%s", dev_name(sup));
-	sysfs_remove_link(&con->kobj, buf);
-	snprintf(buf, len, "consumer:%s", dev_name(con));
+	if (device_is_registered(con)) {
+		snprintf(buf, len, "supplier:%s:%s", dev_bus_name(sup), dev_name(sup));
+		sysfs_remove_link(&con->kobj, buf);
+	}
+	snprintf(buf, len, "consumer:%s:%s", dev_bus_name(con), dev_name(con));
 	sysfs_remove_link(&sup->kobj, buf);
 	kfree(buf);
 }
@@ -633,8 +663,9 @@ struct device_link *device_link_add(struct device *consumer,
 
 	link->link_dev.class = &devlink_class;
 	device_set_pm_not_required(&link->link_dev);
-	dev_set_name(&link->link_dev, "%s--%s",
-		     dev_name(supplier), dev_name(consumer));
+	dev_set_name(&link->link_dev, "%s:%s--%s:%s",
+		     dev_bus_name(supplier), dev_name(supplier),
+		     dev_bus_name(consumer), dev_name(consumer));
 	if (device_register(&link->link_dev)) {
 		put_device(consumer);
 		put_device(supplier);
@@ -1386,7 +1417,7 @@ static void device_links_purge(struct device *dev)
 		return;
 
 	mutex_lock(&wfs_lock);
-	list_del(&dev->links.needs_suppliers);
+	list_del_init(&dev->links.needs_suppliers);
 	mutex_unlock(&wfs_lock);
 
 	/*
@@ -1652,9 +1683,7 @@ const char *dev_driver_string(const struct device *dev)
 	 * never change once they are set, so they don't need special care.
 	 */
 	drv = READ_ONCE(dev->driver);
-	return drv ? drv->name :
-			(dev->bus ? dev->bus->name :
-			(dev->class ? dev->class->name : ""));
+	return drv ? drv->name : dev_bus_name(dev);
 }
 EXPORT_SYMBOL(dev_driver_string);
 
@@ -2423,6 +2452,7 @@ void device_initialize(struct device *dev)
 	device_pm_init(dev);
 	set_dev_node(dev, -1);
 #ifdef CONFIG_GENERIC_MSI_IRQ
+	raw_spin_lock_init(&dev->msi_lock);
 	INIT_LIST_HEAD(&dev->msi_list);
 #endif
 	INIT_LIST_HEAD(&dev->links.consumers);
@@ -4278,7 +4308,7 @@ void set_primary_fwnode(struct device *dev, struct fwnode_handle *fwnode)
 		if (fwnode_is_primary(fn)) {
 			dev->fwnode = fn->secondary;
 			if (!(parent && fn == parent->fwnode))
-				fn->secondary = ERR_PTR(-ENODEV);
+				fn->secondary = NULL;
 		} else {
 			dev->fwnode = NULL;
 		}

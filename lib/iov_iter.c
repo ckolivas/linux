@@ -434,7 +434,7 @@ int iov_iter_fault_in_readable(struct iov_iter *i, size_t bytes)
 	int err;
 	struct iovec v;
 
-	if (!(i->type & (ITER_BVEC|ITER_KVEC))) {
+	if (iter_is_iovec(i)) {
 		iterate_iovec(i, bytes, v, iov, skip, ({
 			err = fault_in_pages_readable(v.iov_base, v.iov_len);
 			if (unlikely(err))
@@ -592,14 +592,15 @@ static __wsum csum_and_memcpy(void *to, const void *from, size_t len,
 }
 
 static size_t csum_and_copy_to_pipe_iter(const void *addr, size_t bytes,
-				__wsum *csum, struct iov_iter *i)
+					 struct csum_state *csstate,
+					 struct iov_iter *i)
 {
 	struct pipe_inode_info *pipe = i->pipe;
 	unsigned int p_mask = pipe->ring_size - 1;
+	__wsum sum = csstate->csum;
+	size_t off = csstate->off;
 	unsigned int i_head;
 	size_t n, r;
-	size_t off = 0;
-	__wsum sum = *csum;
 
 	if (!sanity(i))
 		return 0;
@@ -621,7 +622,8 @@ static size_t csum_and_copy_to_pipe_iter(const void *addr, size_t bytes,
 		i_head++;
 	} while (n);
 	i->count -= bytes;
-	*csum = sum;
+	csstate->csum = sum;
+	csstate->off = off;
 	return bytes;
 }
 
@@ -920,9 +922,12 @@ size_t copy_page_to_iter(struct page *page, size_t offset, size_t bytes,
 		size_t wanted = copy_to_iter(kaddr + offset, bytes, i);
 		kunmap_atomic(kaddr);
 		return wanted;
-	} else if (unlikely(iov_iter_is_discard(i)))
+	} else if (unlikely(iov_iter_is_discard(i))) {
+		if (unlikely(i->count < bytes))
+			bytes = i->count;
+		i->count -= bytes;
 		return bytes;
-	else if (likely(!iov_iter_is_pipe(i)))
+	} else if (likely(!iov_iter_is_pipe(i)))
 		return copy_page_to_iter_iovec(page, offset, bytes, i);
 	else
 		return copy_page_to_iter_pipe(page, offset, bytes, i);
@@ -1522,18 +1527,19 @@ bool csum_and_copy_from_iter_full(void *addr, size_t bytes, __wsum *csum,
 }
 EXPORT_SYMBOL(csum_and_copy_from_iter_full);
 
-size_t csum_and_copy_to_iter(const void *addr, size_t bytes, void *csump,
+size_t csum_and_copy_to_iter(const void *addr, size_t bytes, void *_csstate,
 			     struct iov_iter *i)
 {
+	struct csum_state *csstate = _csstate;
 	const char *from = addr;
-	__wsum *csum = csump;
 	__wsum sum, next;
-	size_t off = 0;
+	size_t off;
 
 	if (unlikely(iov_iter_is_pipe(i)))
-		return csum_and_copy_to_pipe_iter(addr, bytes, csum, i);
+		return csum_and_copy_to_pipe_iter(addr, bytes, _csstate, i);
 
-	sum = *csum;
+	sum = csstate->csum;
+	off = csstate->off;
 	if (unlikely(iov_iter_is_discard(i))) {
 		WARN_ON(1);	/* for now */
 		return 0;
@@ -1561,7 +1567,8 @@ size_t csum_and_copy_to_iter(const void *addr, size_t bytes, void *csump,
 		off += v.iov_len;
 	})
 	)
-	*csum = sum;
+	csstate->csum = sum;
+	csstate->off = off;
 	return bytes;
 }
 EXPORT_SYMBOL(csum_and_copy_to_iter);
@@ -1658,7 +1665,7 @@ static int copy_compat_iovec_from_user(struct iovec *iov,
 		(const struct compat_iovec __user *)uvec;
 	int ret = -EFAULT, i;
 
-	if (!user_access_begin(uvec, nr_segs * sizeof(*uvec)))
+	if (!user_access_begin(uiov, nr_segs * sizeof(*uiov)))
 		return -EFAULT;
 
 	for (i = 0; i < nr_segs; i++) {

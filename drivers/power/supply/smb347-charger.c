@@ -56,6 +56,7 @@
 #define CFG_PIN_EN_CTRL_ACTIVE_LOW		0x60
 #define CFG_PIN_EN_APSD_IRQ			BIT(1)
 #define CFG_PIN_EN_CHARGER_ERROR		BIT(2)
+#define CFG_PIN_EN_CTRL				BIT(4)
 #define CFG_THERM				0x07
 #define CFG_THERM_SOFT_HOT_COMPENSATION_MASK	0x03
 #define CFG_THERM_SOFT_HOT_COMPENSATION_SHIFT	0
@@ -137,6 +138,7 @@
  * @mains_online: is AC/DC input connected
  * @usb_online: is USB input connected
  * @charging_enabled: is charging enabled
+ * @irq_unsupported: is interrupt unsupported by SMB hardware
  * @max_charge_current: maximum current (in uA) the battery can be charged
  * @max_charge_voltage: maximum voltage (in uV) the battery can be charged
  * @pre_charge_current: current (in uA) to use in pre-charging phase
@@ -193,6 +195,7 @@ struct smb347_charger {
 	bool			mains_online;
 	bool			usb_online;
 	bool			charging_enabled;
+	bool			irq_unsupported;
 
 	unsigned int		max_charge_current;
 	unsigned int		max_charge_voltage;
@@ -723,6 +726,15 @@ static int smb347_hw_init(struct smb347_charger *smb)
 	if (ret < 0)
 		goto fail;
 
+	/* Activate pin control, making it writable. */
+	switch (smb->enable_control) {
+	case SMB3XX_CHG_ENABLE_PIN_ACTIVE_LOW:
+	case SMB3XX_CHG_ENABLE_PIN_ACTIVE_HIGH:
+		ret = regmap_set_bits(smb->regmap, CFG_PIN, CFG_PIN_EN_CTRL);
+		if (ret < 0)
+			goto fail;
+	}
+
 	/*
 	 * Make the charging functionality controllable by a write to the
 	 * command register unless pin control is specified in the platform
@@ -862,6 +874,9 @@ static int smb347_irq_set(struct smb347_charger *smb, bool enable)
 {
 	int ret;
 
+	if (smb->irq_unsupported)
+		return 0;
+
 	ret = smb347_set_writable(smb, true);
 	if (ret < 0)
 		return ret;
@@ -923,8 +938,6 @@ static int smb347_irq_init(struct smb347_charger *smb,
 	ret = regmap_update_bits(smb->regmap, CFG_STAT,
 				 CFG_STAT_ACTIVE_HIGH | CFG_STAT_DISABLED,
 				 CFG_STAT_DISABLED);
-	if (ret < 0)
-		client->irq = 0;
 
 	smb347_set_writable(smb, false);
 
@@ -1345,6 +1358,7 @@ static int smb347_probe(struct i2c_client *client,
 		if (ret < 0) {
 			dev_warn(dev, "failed to initialize IRQ: %d\n", ret);
 			dev_warn(dev, "disabling IRQ support\n");
+			smb->irq_unsupported = true;
 		} else {
 			smb347_irq_enable(smb);
 		}
@@ -1357,8 +1371,8 @@ static int smb347_remove(struct i2c_client *client)
 {
 	struct smb347_charger *smb = i2c_get_clientdata(client);
 
-	if (client->irq)
-		smb347_irq_disable(smb);
+	smb347_irq_disable(smb);
+
 	return 0;
 }
 

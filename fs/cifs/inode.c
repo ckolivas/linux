@@ -425,8 +425,7 @@ int cifs_get_inode_info_unix(struct inode **pinode,
 		}
 
 		/* if filetype is different, return error */
-		if (unlikely(((*pinode)->i_mode & S_IFMT) !=
-		    (fattr.cf_mode & S_IFMT))) {
+		if (unlikely(inode_wrong_type(*pinode, fattr.cf_mode))) {
 			CIFS_I(*pinode)->time = 0; /* force reval */
 			rc = -ESTALE;
 			goto cgiiu_exit;
@@ -1243,7 +1242,7 @@ cifs_find_inode(struct inode *inode, void *opaque)
 		return 0;
 
 	/* don't match inode of different type */
-	if ((inode->i_mode & S_IFMT) != (fattr->cf_mode & S_IFMT))
+	if (inode_wrong_type(inode, fattr->cf_mode))
 		return 0;
 
 	/* if it's not a directory or has no dentries, then flag it */
@@ -2375,7 +2374,7 @@ int cifs_getattr(const struct path *path, struct kstat *stat,
 	 * We need to be sure that all dirty pages are written and the server
 	 * has actual ctime, mtime and file length.
 	 */
-	if ((request_mask & (STATX_CTIME | STATX_MTIME | STATX_SIZE)) &&
+	if ((request_mask & (STATX_CTIME | STATX_MTIME | STATX_SIZE | STATX_BLOCKS)) &&
 	    !CIFS_CACHE_READ(CIFS_I(inode)) &&
 	    inode->i_mapping && inode->i_mapping->nrpages != 0) {
 		rc = filemap_fdatawait(inode->i_mapping);
@@ -2565,6 +2564,14 @@ set_size_out:
 	if (rc == 0) {
 		cifsInode->server_eof = attrs->ia_size;
 		cifs_setsize(inode, attrs->ia_size);
+		/*
+		 * i_blocks is not related to (i_size / i_blksize), but instead
+		 * 512 byte (2**9) size is required for calculating num blocks.
+		 * Until we can query the server for actual allocation size,
+		 * this is best estimate we have for blocks allocated for a file
+		 * Number of blocks must be rounded up so size 1 is not 0 blocks
+		 */
+		inode->i_blocks = (512 - 1 + attrs->ia_size) >> 9;
 
 		/*
 		 * The man page of truncate says if the size changed,

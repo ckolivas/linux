@@ -754,11 +754,17 @@ static int gaudi_init_tpc_mem(struct hl_device *hdev)
 	size_t fw_size;
 	void *cpu_addr;
 	dma_addr_t dma_handle;
-	int rc;
+	int rc, count = 5;
 
+again:
 	rc = request_firmware(&fw, GAUDI_TPC_FW_FILE, hdev->dev);
+	if (rc == -EINTR && count-- > 0) {
+		msleep(50);
+		goto again;
+	}
+
 	if (rc) {
-		dev_err(hdev->dev, "Firmware file %s is not found!\n",
+		dev_err(hdev->dev, "Failed to load firmware file %s\n",
 				GAUDI_TPC_FW_FILE);
 		goto out;
 	}
@@ -2158,7 +2164,7 @@ static void gaudi_init_mme_qman(struct hl_device *hdev, u32 mme_offset,
 
 		/* Configure RAZWI IRQ */
 		mme_id = mme_offset /
-				(mmMME1_QM_GLBL_CFG0 - mmMME0_QM_GLBL_CFG0);
+				(mmMME1_QM_GLBL_CFG0 - mmMME0_QM_GLBL_CFG0) / 2;
 
 		mme_qm_err_cfg = MME_QMAN_GLBL_ERR_CFG_MSG_EN_MASK;
 		if (hdev->stop_on_err) {
@@ -2893,7 +2899,7 @@ static int gaudi_init_cpu_queues(struct hl_device *hdev, u32 cpu_timeout)
 static void gaudi_pre_hw_init(struct hl_device *hdev)
 {
 	/* Perform read from the device to make sure device is up */
-	RREG32(mmPCIE_DBI_DEVICE_ID_VENDOR_ID_REG);
+	RREG32(mmHW_STATE);
 
 	/* Set the access through PCI bars (Linux driver only) as
 	 * secured
@@ -2996,7 +3002,7 @@ static int gaudi_hw_init(struct hl_device *hdev)
 	}
 
 	/* Perform read from the device to flush all configuration */
-	RREG32(mmPCIE_DBI_DEVICE_ID_VENDOR_ID_REG);
+	RREG32(mmHW_STATE);
 
 	return 0;
 
@@ -3113,7 +3119,8 @@ static int gaudi_cb_mmap(struct hl_device *hdev, struct vm_area_struct *vma,
 	vma->vm_flags |= VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP |
 			VM_DONTCOPY | VM_NORESERVE;
 
-	rc = dma_mmap_coherent(hdev->dev, vma, cpu_addr, dma_addr, size);
+	rc = dma_mmap_coherent(hdev->dev, vma, cpu_addr,
+				(dma_addr - HOST_PHYS_BASE), size);
 	if (rc)
 		dev_err(hdev->dev, "dma_mmap_coherent error %d", rc);
 
@@ -3701,6 +3708,7 @@ already_pinned:
 	return 0;
 
 unpin_memory:
+	list_del(&userptr->job_node);
 	hl_unpin_host_memory(hdev, userptr);
 free_userptr:
 	kfree(userptr);

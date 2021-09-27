@@ -631,24 +631,26 @@ static int flush_lazy_signals(struct i915_active *ref)
 
 int __i915_active_wait(struct i915_active *ref, int state)
 {
-	int err;
-
 	might_sleep();
 
-	if (!i915_active_acquire_if_busy(ref))
-		return 0;
-
 	/* Any fence added after the wait begins will not be auto-signaled */
-	err = flush_lazy_signals(ref);
-	i915_active_release(ref);
-	if (err)
-		return err;
+	if (i915_active_acquire_if_busy(ref)) {
+		int err;
 
-	if (!i915_active_is_idle(ref) &&
-	    ___wait_var_event(ref, i915_active_is_idle(ref),
-			      state, 0, 0, schedule()))
-		return -EINTR;
+		err = flush_lazy_signals(ref);
+		i915_active_release(ref);
+		if (err)
+			return err;
 
+		if (___wait_var_event(ref, i915_active_is_idle(ref),
+				      state, 0, 0, schedule()))
+			return -EINTR;
+	}
+
+	/*
+	 * After the wait is complete, the caller may free the active.
+	 * We have to flush any concurrent retirement before returning.
+	 */
 	flush_work(&ref->work);
 	return 0;
 }
@@ -1157,7 +1159,8 @@ static int auto_active(struct i915_active *ref)
 	return 0;
 }
 
-static void auto_retire(struct i915_active *ref)
+__i915_active_call static void
+auto_retire(struct i915_active *ref)
 {
 	i915_active_put(ref);
 }

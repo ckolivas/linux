@@ -1259,6 +1259,7 @@ static int hidpp20_battery_map_status_voltage(u8 data[3], int *voltage,
 	int status;
 
 	long flags = (long) data[2];
+	*level = POWER_SUPPLY_CAPACITY_LEVEL_UNKNOWN;
 
 	if (flags & 0x80)
 		switch (flags & 0x07) {
@@ -4051,6 +4052,8 @@ static const struct hid_device_id hidpp_devices[] = {
 	{ /* MX Master mouse over Bluetooth */
 	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb012),
 	  .driver_data = HIDPP_QUIRK_HI_RES_SCROLL_X2121 },
+	{ /* MX Ergo trackball over Bluetooth */
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb01d) },
 	{ HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb01e),
 	  .driver_data = HIDPP_QUIRK_HI_RES_SCROLL_X2121 },
 	{ /* MX Master 3 mouse over Bluetooth */

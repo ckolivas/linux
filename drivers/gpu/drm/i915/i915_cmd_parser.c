@@ -939,7 +939,7 @@ static void fini_hash_table(struct intel_engine_cs *engine)
  * struct intel_engine_cs based on whether the platform requires software
  * command parsing.
  */
-void intel_engine_init_cmd_parser(struct intel_engine_cs *engine)
+int intel_engine_init_cmd_parser(struct intel_engine_cs *engine)
 {
 	const struct drm_i915_cmd_table *cmd_tables;
 	int cmd_table_count;
@@ -947,7 +947,7 @@ void intel_engine_init_cmd_parser(struct intel_engine_cs *engine)
 
 	if (!IS_GEN(engine->i915, 7) && !(IS_GEN(engine->i915, 9) &&
 					  engine->class == COPY_ENGINE_CLASS))
-		return;
+		return 0;
 
 	switch (engine->class) {
 	case RENDER_CLASS:
@@ -1012,19 +1012,19 @@ void intel_engine_init_cmd_parser(struct intel_engine_cs *engine)
 		break;
 	default:
 		MISSING_CASE(engine->class);
-		return;
+		goto out;
 	}
 
 	if (!validate_cmds_sorted(engine, cmd_tables, cmd_table_count)) {
 		drm_err(&engine->i915->drm,
 			"%s: command descriptions are not sorted\n",
 			engine->name);
-		return;
+		goto out;
 	}
 	if (!validate_regs_sorted(engine)) {
 		drm_err(&engine->i915->drm,
 			"%s: registers are not sorted\n", engine->name);
-		return;
+		goto out;
 	}
 
 	ret = init_hash_table(engine, cmd_tables, cmd_table_count);
@@ -1032,10 +1032,17 @@ void intel_engine_init_cmd_parser(struct intel_engine_cs *engine)
 		drm_err(&engine->i915->drm,
 			"%s: initialised failed!\n", engine->name);
 		fini_hash_table(engine);
-		return;
+		goto out;
 	}
 
 	engine->flags |= I915_ENGINE_USING_CMD_PARSER;
+
+out:
+	if (intel_engine_requires_cmd_parser(engine) &&
+	    !intel_engine_using_cmd_parser(engine))
+		return -EINVAL;
+
+	return 0;
 }
 
 /**
@@ -1136,27 +1143,30 @@ find_reg(const struct intel_engine_cs *engine, u32 addr)
 /* Returns a vmap'd pointer to dst_obj, which the caller must unmap */
 static u32 *copy_batch(struct drm_i915_gem_object *dst_obj,
 		       struct drm_i915_gem_object *src_obj,
-		       unsigned long offset, unsigned long length)
+		       u32 offset, u32 length)
 {
-	bool needs_clflush;
+	unsigned int src_needs_clflush;
+	unsigned int dst_needs_clflush;
 	void *dst, *src;
 	int ret;
 
+	ret = i915_gem_object_prepare_write(dst_obj, &dst_needs_clflush);
+	if (ret)
+		return ERR_PTR(ret);
+
 	dst = i915_gem_object_pin_map(dst_obj, I915_MAP_FORCE_WB);
+	i915_gem_object_finish_access(dst_obj);
 	if (IS_ERR(dst))
 		return dst;
 
-	ret = i915_gem_object_pin_pages(src_obj);
+	ret = i915_gem_object_prepare_read(src_obj, &src_needs_clflush);
 	if (ret) {
 		i915_gem_object_unpin_map(dst_obj);
 		return ERR_PTR(ret);
 	}
 
-	needs_clflush =
-		!(src_obj->cache_coherent & I915_BO_CACHE_COHERENT_FOR_READ);
-
 	src = ERR_PTR(-ENODEV);
-	if (needs_clflush && i915_has_memcpy_from_wc()) {
+	if (src_needs_clflush && i915_has_memcpy_from_wc()) {
 		src = i915_gem_object_pin_map(src_obj, I915_MAP_WC);
 		if (!IS_ERR(src)) {
 			i915_unaligned_memcpy_from_wc(dst,
@@ -1166,7 +1176,7 @@ static u32 *copy_batch(struct drm_i915_gem_object *dst_obj,
 		}
 	}
 	if (IS_ERR(src)) {
-		unsigned long x, n;
+		unsigned long x, n, remain;
 		void *ptr;
 
 		/*
@@ -1177,30 +1187,32 @@ static u32 *copy_batch(struct drm_i915_gem_object *dst_obj,
 		 * We don't care about copying too much here as we only
 		 * validate up to the end of the batch.
 		 */
-		if (!(dst_obj->cache_coherent & I915_BO_CACHE_COHERENT_FOR_READ))
-			length = round_up(length,
+		remain = length;
+		if (dst_needs_clflush & CLFLUSH_BEFORE)
+			remain = round_up(remain,
 					  boot_cpu_data.x86_clflush_size);
 
 		ptr = dst;
 		x = offset_in_page(offset);
-		for (n = offset >> PAGE_SHIFT; length; n++) {
-			int len = min(length, PAGE_SIZE - x);
+		for (n = offset >> PAGE_SHIFT; remain; n++) {
+			int len = min(remain, PAGE_SIZE - x);
 
 			src = kmap_atomic(i915_gem_object_get_page(src_obj, n));
-			if (needs_clflush)
+			if (src_needs_clflush)
 				drm_clflush_virt_range(src + x, len);
 			memcpy(ptr, src + x, len);
 			kunmap_atomic(src);
 
 			ptr += len;
-			length -= len;
+			remain -= len;
 			x = 0;
 		}
 	}
 
-	i915_gem_object_unpin_pages(src_obj);
+	i915_gem_object_finish_access(src_obj);
 
-	/* dst_obj is returned with vmap pinned */
+	memset32(dst + length, 0, (dst_obj->base.size - length) / sizeof(u32));
+
 	return dst;
 }
 
@@ -1392,11 +1404,6 @@ static unsigned long *alloc_whitelist(u32 batch_length)
 
 #define LENGTH_BIAS 2
 
-static bool shadow_needs_clflush(struct drm_i915_gem_object *obj)
-{
-	return !(obj->cache_coherent & I915_BO_CACHE_COHERENT_FOR_WRITE);
-}
-
 /**
  * intel_engine_cmd_parser() - parse a batch buffer for privilege violations
  * @engine: the engine on which the batch is to execute
@@ -1412,6 +1419,7 @@ static bool shadow_needs_clflush(struct drm_i915_gem_object *obj)
  * Return: non-zero if the parser finds violations or otherwise fails; -EACCES
  * if the batch appears legal but should use hardware parsing
  */
+
 int intel_engine_cmd_parser(struct intel_engine_cs *engine,
 			    struct i915_vma *batch,
 			    unsigned long batch_offset,
@@ -1432,7 +1440,8 @@ int intel_engine_cmd_parser(struct intel_engine_cs *engine,
 				     batch->size));
 	GEM_BUG_ON(!batch_length);
 
-	cmd = copy_batch(shadow->obj, batch->obj, batch_offset, batch_length);
+	cmd = copy_batch(shadow->obj, batch->obj,
+			 batch_offset, batch_length);
 	if (IS_ERR(cmd)) {
 		DRM_DEBUG("CMD: Failed to copy batch\n");
 		return PTR_ERR(cmd);
@@ -1539,16 +1548,9 @@ int intel_engine_cmd_parser(struct intel_engine_cs *engine,
 				ret = 0; /* allow execution */
 			}
 		}
-
-		if (shadow_needs_clflush(shadow->obj))
-			drm_clflush_virt_range(batch_end, 8);
 	}
 
-	if (shadow_needs_clflush(shadow->obj)) {
-		void *ptr = page_mask_bits(shadow->obj->mm.mapping);
-
-		drm_clflush_virt_range(ptr, (void *)(cmd + 1) - ptr);
-	}
+	i915_gem_object_flush_map(shadow->obj);
 
 	if (!IS_ERR_OR_NULL(jump_whitelist))
 		kfree(jump_whitelist);

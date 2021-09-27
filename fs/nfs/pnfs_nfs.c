@@ -78,22 +78,18 @@ void
 pnfs_generic_clear_request_commit(struct nfs_page *req,
 				  struct nfs_commit_info *cinfo)
 {
-	struct pnfs_layout_segment *freeme = NULL;
+	struct pnfs_commit_bucket *bucket = NULL;
 
 	if (!test_and_clear_bit(PG_COMMIT_TO_DS, &req->wb_flags))
 		goto out;
 	cinfo->ds->nwritten--;
-	if (list_is_singular(&req->wb_list)) {
-		struct pnfs_commit_bucket *bucket;
-
+	if (list_is_singular(&req->wb_list))
 		bucket = list_first_entry(&req->wb_list,
-					  struct pnfs_commit_bucket,
-					  written);
-		freeme = pnfs_free_bucket_lseg(bucket);
-	}
+					  struct pnfs_commit_bucket, written);
 out:
 	nfs_request_remove_commit_list(req, cinfo);
-	pnfs_put_lseg(freeme);
+	if (bucket)
+		pnfs_put_lseg(pnfs_free_bucket_lseg(bucket));
 }
 EXPORT_SYMBOL_GPL(pnfs_generic_clear_request_commit);
 
@@ -407,12 +403,16 @@ pnfs_bucket_get_committing(struct list_head *head,
 			   struct pnfs_commit_bucket *bucket,
 			   struct nfs_commit_info *cinfo)
 {
+	struct pnfs_layout_segment *lseg;
 	struct list_head *pos;
 
 	list_for_each(pos, &bucket->committing)
 		cinfo->ds->ncommitting--;
 	list_splice_init(&bucket->committing, head);
-	return pnfs_free_bucket_lseg(bucket);
+	lseg = pnfs_free_bucket_lseg(bucket);
+	if (!lseg)
+		lseg = pnfs_get_lseg(bucket->lseg);
+	return lseg;
 }
 
 static struct nfs_commit_data *
@@ -424,8 +424,6 @@ pnfs_bucket_fetch_commitdata(struct pnfs_commit_bucket *bucket,
 	if (!data)
 		return NULL;
 	data->lseg = pnfs_bucket_get_committing(&data->pages, bucket, cinfo);
-	if (!data->lseg)
-		data->lseg = pnfs_get_lseg(bucket->lseg);
 	return data;
 }
 
@@ -793,19 +791,16 @@ out:
 }
 EXPORT_SYMBOL_GPL(nfs4_pnfs_ds_add);
 
-static void nfs4_wait_ds_connect(struct nfs4_pnfs_ds *ds)
+static int nfs4_wait_ds_connect(struct nfs4_pnfs_ds *ds)
 {
 	might_sleep();
-	wait_on_bit(&ds->ds_state, NFS4DS_CONNECTING,
-			TASK_KILLABLE);
+	return wait_on_bit(&ds->ds_state, NFS4DS_CONNECTING, TASK_KILLABLE);
 }
 
 static void nfs4_clear_ds_conn_bit(struct nfs4_pnfs_ds *ds)
 {
 	smp_mb__before_atomic();
-	clear_bit(NFS4DS_CONNECTING, &ds->ds_state);
-	smp_mb__after_atomic();
-	wake_up_bit(&ds->ds_state, NFS4DS_CONNECTING);
+	clear_and_wake_up_bit(NFS4DS_CONNECTING, &ds->ds_state);
 }
 
 static struct nfs_client *(*get_v3_ds_connect)(
@@ -971,30 +966,33 @@ int nfs4_pnfs_ds_connect(struct nfs_server *mds_srv, struct nfs4_pnfs_ds *ds,
 {
 	int err;
 
-again:
-	err = 0;
-	if (test_and_set_bit(NFS4DS_CONNECTING, &ds->ds_state) == 0) {
-		if (version == 3) {
-			err = _nfs4_pnfs_v3_ds_connect(mds_srv, ds, timeo,
-						       retrans);
-		} else if (version == 4) {
-			err = _nfs4_pnfs_v4_ds_connect(mds_srv, ds, timeo,
-						       retrans, minor_version);
-		} else {
-			dprintk("%s: unsupported DS version %d\n", __func__,
-				version);
-			err = -EPROTONOSUPPORT;
-		}
+	do {
+		err = nfs4_wait_ds_connect(ds);
+		if (err || ds->ds_clp)
+			goto out;
+		if (nfs4_test_deviceid_unavailable(devid))
+			return -ENODEV;
+	} while (test_and_set_bit(NFS4DS_CONNECTING, &ds->ds_state) != 0);
 
-		nfs4_clear_ds_conn_bit(ds);
-	} else {
-		nfs4_wait_ds_connect(ds);
+	if (ds->ds_clp)
+		goto connect_done;
 
-		/* what was waited on didn't connect AND didn't mark unavail */
-		if (!ds->ds_clp && !nfs4_test_deviceid_unavailable(devid))
-			goto again;
+	switch (version) {
+	case 3:
+		err = _nfs4_pnfs_v3_ds_connect(mds_srv, ds, timeo, retrans);
+		break;
+	case 4:
+		err = _nfs4_pnfs_v4_ds_connect(mds_srv, ds, timeo, retrans,
+					       minor_version);
+		break;
+	default:
+		dprintk("%s: unsupported DS version %d\n", __func__, version);
+		err = -EPROTONOSUPPORT;
 	}
 
+connect_done:
+	nfs4_clear_ds_conn_bit(ds);
+out:
 	/*
 	 * At this point the ds->ds_clp should be ready, but it might have
 	 * hit an error.

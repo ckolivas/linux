@@ -177,7 +177,8 @@ enum mce_notifier_prios {
 	MCE_PRIO_EXTLOG,
 	MCE_PRIO_UC,
 	MCE_PRIO_EARLY,
-	MCE_PRIO_CEC
+	MCE_PRIO_CEC,
+	MCE_PRIO_HIGHEST = MCE_PRIO_CEC
 };
 
 struct notifier_block;
@@ -258,6 +259,7 @@ enum mcp_flags {
 	MCP_TIMESTAMP	= BIT(0),	/* log time stamp */
 	MCP_UC		= BIT(1),	/* log uncorrected errors */
 	MCP_DONTLOG	= BIT(2),	/* only clear, don't log */
+	MCP_QUEUE_LOG	= BIT(3),	/* only queue to genpool */
 };
 bool machine_check_poll(enum mcp_flags flags, mce_banks_t *b);
 

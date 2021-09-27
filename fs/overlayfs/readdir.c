@@ -319,18 +319,6 @@ static inline int ovl_dir_read(struct path *realpath,
 	return err;
 }
 
-/*
- * Can we iterate real dir directly?
- *
- * Non-merge dir may contain whiteouts from a time it was a merge upper, before
- * lower dir was removed under it and possibly before it was rotated from upper
- * to lower layer.
- */
-static bool ovl_dir_is_real(struct dentry *dir)
-{
-	return !ovl_test_flag(OVL_WHITEOUTS, d_inode(dir));
-}
-
 static void ovl_dir_reset(struct file *file)
 {
 	struct ovl_dir_file *od = file->private_data;
@@ -865,7 +853,7 @@ struct file *ovl_dir_real_file(const struct file *file, bool want_upper)
 
 	struct ovl_dir_file *od = file->private_data;
 	struct dentry *dentry = file->f_path.dentry;
-	struct file *realfile = od->realfile;
+	struct file *old, *realfile = od->realfile;
 
 	if (!OVL_TYPE_UPPER(ovl_path_type(dentry)))
 		return want_upper ? NULL : realfile;
@@ -874,29 +862,20 @@ struct file *ovl_dir_real_file(const struct file *file, bool want_upper)
 	 * Need to check if we started out being a lower dir, but got copied up
 	 */
 	if (!od->is_upper) {
-		struct inode *inode = file_inode(file);
-
 		realfile = READ_ONCE(od->upperfile);
 		if (!realfile) {
 			struct path upperpath;
 
 			ovl_path_upper(dentry, &upperpath);
 			realfile = ovl_dir_open_realfile(file, &upperpath);
+			if (IS_ERR(realfile))
+				return realfile;
 
-			inode_lock(inode);
-			if (!od->upperfile) {
-				if (IS_ERR(realfile)) {
-					inode_unlock(inode);
-					return realfile;
-				}
-				smp_store_release(&od->upperfile, realfile);
-			} else {
-				/* somebody has beaten us to it */
-				if (!IS_ERR(realfile))
-					fput(realfile);
-				realfile = od->upperfile;
+			old = cmpxchg_release(&od->upperfile, NULL, realfile);
+			if (old) {
+				fput(realfile);
+				realfile = old;
 			}
-			inode_unlock(inode);
 		}
 	}
 
@@ -909,8 +888,9 @@ static int ovl_dir_fsync(struct file *file, loff_t start, loff_t end,
 	struct file *realfile;
 	int err;
 
-	if (!ovl_should_sync(OVL_FS(file->f_path.dentry->d_sb)))
-		return 0;
+	err = ovl_sync_status(OVL_FS(file->f_path.dentry->d_sb));
+	if (err <= 0)
+		return err;
 
 	realfile = ovl_dir_real_file(file, true);
 	err = PTR_ERR_OR_ZERO(realfile);

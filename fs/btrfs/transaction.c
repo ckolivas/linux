@@ -155,6 +155,7 @@ static noinline void switch_commit_roots(struct btrfs_trans_handle *trans)
 	struct btrfs_transaction *cur_trans = trans->transaction;
 	struct btrfs_fs_info *fs_info = trans->fs_info;
 	struct btrfs_root *root, *tmp;
+	struct btrfs_caching_control *caching_ctl, *next;
 
 	down_write(&fs_info->commit_root_sem);
 	list_for_each_entry_safe(root, tmp, &cur_trans->switch_commits,
@@ -180,6 +181,45 @@ static noinline void switch_commit_roots(struct btrfs_trans_handle *trans)
 		spin_lock(&cur_trans->dropped_roots_lock);
 	}
 	spin_unlock(&cur_trans->dropped_roots_lock);
+
+	/*
+	 * We have to update the last_byte_to_unpin under the commit_root_sem,
+	 * at the same time we swap out the commit roots.
+	 *
+	 * This is because we must have a real view of the last spot the caching
+	 * kthreads were while caching.  Consider the following views of the
+	 * extent tree for a block group
+	 *
+	 * commit root
+	 * +----+----+----+----+----+----+----+
+	 * |\\\\|    |\\\\|\\\\|    |\\\\|\\\\|
+	 * +----+----+----+----+----+----+----+
+	 * 0    1    2    3    4    5    6    7
+	 *
+	 * new commit root
+	 * +----+----+----+----+----+----+----+
+	 * |    |    |    |\\\\|    |    |\\\\|
+	 * +----+----+----+----+----+----+----+
+	 * 0    1    2    3    4    5    6    7
+	 *
+	 * If the cache_ctl->progress was at 3, then we are only allowed to
+	 * unpin [0,1) and [2,3], because the caching thread has already
+	 * processed those extents.  We are not allowed to unpin [5,6), because
+	 * the caching thread will re-start it's search from 3, and thus find
+	 * the hole from [4,6) to add to the free space cache.
+	 */
+	list_for_each_entry_safe(caching_ctl, next,
+				 &fs_info->caching_block_groups, list) {
+		struct btrfs_block_group *cache = caching_ctl->block_group;
+
+		if (btrfs_block_group_done(cache)) {
+			cache->last_byte_to_unpin = (u64)-1;
+			list_del_init(&caching_ctl->list);
+			btrfs_put_caching_control(caching_ctl);
+		} else {
+			cache->last_byte_to_unpin = caching_ctl->progress;
+		}
+	}
 	up_write(&fs_info->commit_root_sem);
 }
 
@@ -1280,7 +1320,6 @@ static noinline int commit_fs_roots(struct btrfs_trans_handle *trans)
 	struct btrfs_root *gang[8];
 	int i;
 	int ret;
-	int err = 0;
 
 	spin_lock(&fs_info->fs_roots_radix_lock);
 	while (1) {
@@ -1292,6 +1331,8 @@ static noinline int commit_fs_roots(struct btrfs_trans_handle *trans)
 			break;
 		for (i = 0; i < ret; i++) {
 			struct btrfs_root *root = gang[i];
+			int ret2;
+
 			radix_tree_tag_clear(&fs_info->fs_roots_radix,
 					(unsigned long)root->root_key.objectid,
 					BTRFS_ROOT_TRANS_TAG);
@@ -1313,17 +1354,17 @@ static noinline int commit_fs_roots(struct btrfs_trans_handle *trans)
 						    root->node);
 			}
 
-			err = btrfs_update_root(trans, fs_info->tree_root,
+			ret2 = btrfs_update_root(trans, fs_info->tree_root,
 						&root->root_key,
 						&root->root_item);
+			if (ret2)
+				return ret2;
 			spin_lock(&fs_info->fs_roots_radix_lock);
-			if (err)
-				break;
 			btrfs_qgroup_free_meta_all_pertrans(root);
 		}
 	}
 	spin_unlock(&fs_info->fs_roots_radix_lock);
-	return err;
+	return 0;
 }
 
 /*
@@ -1341,8 +1382,10 @@ int btrfs_defrag_root(struct btrfs_root *root)
 
 	while (1) {
 		trans = btrfs_start_transaction(root, 0);
-		if (IS_ERR(trans))
-			return PTR_ERR(trans);
+		if (IS_ERR(trans)) {
+			ret = PTR_ERR(trans);
+			break;
+		}
 
 		ret = btrfs_defrag_leaves(trans, root);
 
@@ -1909,7 +1952,6 @@ static void cleanup_transaction(struct btrfs_trans_handle *trans, int err)
 	 */
 	BUG_ON(list_empty(&cur_trans->list));
 
-	list_del_init(&cur_trans->list);
 	if (cur_trans == fs_info->running_transaction) {
 		cur_trans->state = TRANS_STATE_COMMIT_DOING;
 		spin_unlock(&fs_info->trans_lock);
@@ -1918,6 +1960,17 @@ static void cleanup_transaction(struct btrfs_trans_handle *trans, int err)
 
 		spin_lock(&fs_info->trans_lock);
 	}
+
+	/*
+	 * Now that we know no one else is still using the transaction we can
+	 * remove the transaction from the list of transactions. This avoids
+	 * the transaction kthread from cleaning up the transaction while some
+	 * other task is still using it, which could result in a use-after-free
+	 * on things like log trees, as it forces the transaction kthread to
+	 * wait for this transaction to be cleaned up by us.
+	 */
+	list_del_init(&cur_trans->list);
+
 	spin_unlock(&fs_info->trans_lock);
 
 	btrfs_cleanup_one_transaction(trans->transaction, fs_info);
@@ -2292,8 +2345,6 @@ int btrfs_commit_transaction(struct btrfs_trans_handle *trans)
 		ret = cur_trans->aborted;
 		goto unlock_tree_log;
 	}
-
-	btrfs_prepare_extent_commit(fs_info);
 
 	cur_trans = fs_info->running_transaction;
 

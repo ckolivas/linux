@@ -759,6 +759,13 @@ void __icmp_send(struct sk_buff *skb_in, int type, int code, __be32 info,
 		icmp_param.data_len = room;
 	icmp_param.head_len = sizeof(struct icmphdr);
 
+	/* if we don't have a source address at this point, fall back to the
+	 * dummy address instead of sending out a packet with a source address
+	 * of 0.0.0.0
+	 */
+	if (!fl4.saddr)
+		fl4.saddr = htonl(INADDR_DUMMY);
+
 	icmp_push_reply(&icmp_param, &fl4, &ipc, &rt);
 ende:
 	ip_rt_put(rt);
@@ -775,13 +782,14 @@ EXPORT_SYMBOL(__icmp_send);
 void icmp_ndo_send(struct sk_buff *skb_in, int type, int code, __be32 info)
 {
 	struct sk_buff *cloned_skb = NULL;
+	struct ip_options opts = { 0 };
 	enum ip_conntrack_info ctinfo;
 	struct nf_conn *ct;
 	__be32 orig_ip;
 
 	ct = nf_ct_get(skb_in, &ctinfo);
 	if (!ct || !(ct->status & IPS_SRC_NAT)) {
-		icmp_send(skb_in, type, code, info);
+		__icmp_send(skb_in, type, code, info, &opts);
 		return;
 	}
 
@@ -796,7 +804,7 @@ void icmp_ndo_send(struct sk_buff *skb_in, int type, int code, __be32 info)
 
 	orig_ip = ip_hdr(skb_in)->saddr;
 	ip_hdr(skb_in)->saddr = ct->tuplehash[0].tuple.src.u3.ip;
-	icmp_send(skb_in, type, code, info);
+	__icmp_send(skb_in, type, code, info, &opts);
 	ip_hdr(skb_in)->saddr = orig_ip;
 out:
 	consume_skb(cloned_skb);

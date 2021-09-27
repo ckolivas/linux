@@ -558,9 +558,12 @@ static void zpci_cleanup_bus_resources(struct zpci_dev *zdev)
 
 int pcibios_add_device(struct pci_dev *pdev)
 {
+	struct zpci_dev *zdev = to_zpci(pdev);
 	struct resource *res;
 	int i;
 
+	/* The pdev has a reference to the zdev via its bus */
+	zpci_zdev_get(zdev);
 	if (pdev->is_physfn)
 		pdev->no_vf_scan = 1;
 
@@ -580,7 +583,10 @@ int pcibios_add_device(struct pci_dev *pdev)
 
 void pcibios_release_device(struct pci_dev *pdev)
 {
+	struct zpci_dev *zdev = to_zpci(pdev);
+
 	zpci_unmap_resources(pdev);
+	zpci_zdev_put(zdev);
 }
 
 int pcibios_enable_device(struct pci_dev *pdev, int mask)
@@ -653,9 +659,10 @@ int zpci_enable_device(struct zpci_dev *zdev)
 {
 	int rc;
 
-	rc = clp_enable_fh(zdev, ZPCI_NR_DMA_SPACES);
-	if (rc)
+	if (clp_enable_fh(zdev, ZPCI_NR_DMA_SPACES)) {
+		rc = -EIO;
 		goto out;
+	}
 
 	rc = zpci_dma_init_device(zdev);
 	if (rc)
@@ -678,60 +685,105 @@ int zpci_disable_device(struct zpci_dev *zdev)
 	 * The zPCI function may already be disabled by the platform, this is
 	 * detected in clp_disable_fh() which becomes a no-op.
 	 */
-	return clp_disable_fh(zdev);
+	return clp_disable_fh(zdev) ? -EIO : 0;
 }
 EXPORT_SYMBOL_GPL(zpci_disable_device);
 
-void zpci_remove_device(struct zpci_dev *zdev)
+/* zpci_remove_device - Removes the given zdev from the PCI core
+ * @zdev: the zdev to be removed from the PCI core
+ * @set_error: if true the device's error state is set to permanent failure
+ *
+ * Sets a zPCI device to a configured but offline state; the zPCI
+ * device is still accessible through its hotplug slot and the zPCI
+ * API but is removed from the common code PCI bus, making it
+ * no longer available to drivers.
+ */
+void zpci_remove_device(struct zpci_dev *zdev, bool set_error)
 {
 	struct zpci_bus *zbus = zdev->zbus;
 	struct pci_dev *pdev;
 
+	if (!zdev->zbus->bus)
+		return;
+
 	pdev = pci_get_slot(zbus->bus, zdev->devfn);
 	if (pdev) {
-		if (pdev->is_virtfn)
-			return zpci_iov_remove_virtfn(pdev, zdev->vfn);
+		if (set_error)
+			pdev->error_state = pci_channel_io_perm_failure;
+		if (pdev->is_virtfn) {
+			zpci_iov_remove_virtfn(pdev, zdev->vfn);
+			/* balance pci_get_slot */
+			pci_dev_put(pdev);
+			return;
+		}
 		pci_stop_and_remove_bus_device_locked(pdev);
+		/* balance pci_get_slot */
+		pci_dev_put(pdev);
 	}
 }
 
-int zpci_create_device(struct zpci_dev *zdev)
+/**
+ * zpci_create_device() - Create a new zpci_dev and add it to the zbus
+ * @fid: Function ID of the device to be created
+ * @fh: Current Function Handle of the device to be created
+ * @state: Initial state after creation either Standby or Configured
+ *
+ * Creates a new zpci device and adds it to its, possibly newly created, zbus
+ * as well as zpci_list.
+ *
+ * Returns: 0 on success, an error value otherwise
+ */
+int zpci_create_device(u32 fid, u32 fh, enum zpci_state state)
 {
+	struct zpci_dev *zdev;
 	int rc;
 
+	zpci_dbg(3, "add fid:%x, fh:%x, c:%d\n", fid, fh, state);
+	zdev = kzalloc(sizeof(*zdev), GFP_KERNEL);
+	if (!zdev)
+		return -ENOMEM;
+
+	/* FID and Function Handle are the static/dynamic identifiers */
+	zdev->fid = fid;
+	zdev->fh = fh;
+
+	/* Query function properties and update zdev */
+	rc = clp_query_pci_fn(zdev);
+	if (rc)
+		goto error;
+	zdev->state =  state;
+
 	kref_init(&zdev->kref);
+	mutex_init(&zdev->lock);
+
+	rc = zpci_init_iommu(zdev);
+	if (rc)
+		goto error;
+
+	if (zdev->state == ZPCI_FN_STATE_CONFIGURED) {
+		rc = zpci_enable_device(zdev);
+		if (rc)
+			goto error_destroy_iommu;
+	}
+
+	rc = zpci_bus_device_register(zdev, &pci_root_ops);
+	if (rc)
+		goto error_disable;
 
 	spin_lock(&zpci_list_lock);
 	list_add_tail(&zdev->entry, &zpci_list);
 	spin_unlock(&zpci_list_lock);
 
-	rc = zpci_init_iommu(zdev);
-	if (rc)
-		goto out;
-
-	mutex_init(&zdev->lock);
-	if (zdev->state == ZPCI_FN_STATE_CONFIGURED) {
-		rc = zpci_enable_device(zdev);
-		if (rc)
-			goto out_destroy_iommu;
-	}
-
-	rc = zpci_bus_device_register(zdev, &pci_root_ops);
-	if (rc)
-		goto out_disable;
-
 	return 0;
 
-out_disable:
+error_disable:
 	if (zdev->state == ZPCI_FN_STATE_ONLINE)
 		zpci_disable_device(zdev);
-
-out_destroy_iommu:
+error_destroy_iommu:
 	zpci_destroy_iommu(zdev);
-out:
-	spin_lock(&zpci_list_lock);
-	list_del(&zdev->entry);
-	spin_unlock(&zpci_list_lock);
+error:
+	zpci_dbg(0, "add fid:%x, rc:%d\n", fid, rc);
+	kfree(zdev);
 	return rc;
 }
 
@@ -740,7 +792,7 @@ void zpci_release_device(struct kref *kref)
 	struct zpci_dev *zdev = container_of(kref, struct zpci_dev, kref);
 
 	if (zdev->zbus->bus)
-		zpci_remove_device(zdev);
+		zpci_remove_device(zdev, false);
 
 	switch (zdev->state) {
 	case ZPCI_FN_STATE_ONLINE:
@@ -814,7 +866,6 @@ static void zpci_mem_exit(void)
 }
 
 static unsigned int s390_pci_probe __initdata = 1;
-static unsigned int s390_pci_no_mio __initdata;
 unsigned int s390_pci_force_floating __initdata;
 static unsigned int s390_pci_initialized;
 
@@ -825,7 +876,7 @@ char * __init pcibios_setup(char *str)
 		return NULL;
 	}
 	if (!strcmp(str, "nomio")) {
-		s390_pci_no_mio = 1;
+		S390_lowcore.machine_flags &= ~MACHINE_FLAG_PCI_MIO;
 		return NULL;
 	}
 	if (!strcmp(str, "force_floating")) {
@@ -854,7 +905,7 @@ static int __init pci_base_init(void)
 	if (!test_facility(69) || !test_facility(71))
 		return 0;
 
-	if (test_facility(153) && !s390_pci_no_mio) {
+	if (MACHINE_HAS_PCI_MIO) {
 		static_branch_enable(&have_mio);
 		ctl_set_bit(2, 5);
 	}

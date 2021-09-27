@@ -833,6 +833,7 @@ iwl_mvm_tx_tso_segment(struct sk_buff *skb, unsigned int num_subframes,
 
 	next = skb_gso_segment(skb, netdev_flags);
 	skb_shinfo(skb)->gso_size = mss;
+	skb_shinfo(skb)->gso_type = ipv4 ? SKB_GSO_TCPV4 : SKB_GSO_TCPV6;
 	if (WARN_ON_ONCE(IS_ERR(next)))
 		return -EINVAL;
 	else if (next)
@@ -855,6 +856,8 @@ iwl_mvm_tx_tso_segment(struct sk_buff *skb, unsigned int num_subframes,
 
 		if (tcp_payload_len > mss) {
 			skb_shinfo(tmp)->gso_size = mss;
+			skb_shinfo(tmp)->gso_type = ipv4 ? SKB_GSO_TCPV4 :
+							   SKB_GSO_TCPV6;
 		} else {
 			if (qos) {
 				u8 *qc;
@@ -1080,6 +1083,9 @@ static int iwl_mvm_tx_mpdu(struct iwl_mvm *mvm, struct sk_buff *skb,
 		return -1;
 
 	if (WARN_ON_ONCE(mvmsta->sta_id == IWL_MVM_INVALID_STA))
+		return -1;
+
+	if (unlikely(ieee80211_is_any_nullfunc(fc)) && sta->he_cap.has_he)
 		return -1;
 
 	if (unlikely(ieee80211_is_probe_resp(fc)))

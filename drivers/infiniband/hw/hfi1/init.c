@@ -650,12 +650,7 @@ void hfi1_init_pportdata(struct pci_dev *pdev, struct hfi1_pportdata *ppd,
 
 	ppd->pkeys[default_pkey_idx] = DEFAULT_P_KEY;
 	ppd->part_enforce |= HFI1_PART_ENFORCE_IN;
-
-	if (loopback) {
-		dd_dev_err(dd, "Faking data partition 0x8001 in idx %u\n",
-			   !default_pkey_idx);
-		ppd->pkeys[!default_pkey_idx] = 0x8001;
-	}
+	ppd->pkeys[0] = 0x8001;
 
 	INIT_WORK(&ppd->link_vc_work, handle_verify_cap);
 	INIT_WORK(&ppd->link_up_work, handle_link_up);
@@ -1277,7 +1272,6 @@ static struct hfi1_devdata *hfi1_alloc_devdata(struct pci_dev *pdev,
 	dd->pport = (struct hfi1_pportdata *)(dd + 1);
 	dd->pcidev = pdev;
 	pci_set_drvdata(pdev, dd);
-	dd->node = NUMA_NO_NODE;
 
 	ret = xa_alloc_irq(&hfi1_dev_table, &dd->unit, dd, xa_limit_32b,
 			GFP_KERNEL);
@@ -1287,6 +1281,15 @@ static struct hfi1_devdata *hfi1_alloc_devdata(struct pci_dev *pdev,
 		goto bail;
 	}
 	rvt_set_ibdev_name(&dd->verbs_dev.rdi, "%s_%d", class_name(), dd->unit);
+	/*
+	 * If the BIOS does not have the NUMA node information set, select
+	 * NUMA 0 so we get consistent performance.
+	 */
+	dd->node = pcibus_to_node(pdev->bus);
+	if (dd->node == NUMA_NO_NODE) {
+		dd_dev_err(dd, "Invalid PCI NUMA node. Performance may be affected\n");
+		dd->node = 0;
+	}
 
 	/*
 	 * Initialize all locks for the device. This needs to be as early as

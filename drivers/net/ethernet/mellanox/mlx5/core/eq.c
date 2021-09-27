@@ -859,8 +859,8 @@ clean:
 	return err;
 }
 
-int mlx5_vector2eqn(struct mlx5_core_dev *dev, int vector, int *eqn,
-		    unsigned int *irqn)
+static int vector2eqnirqn(struct mlx5_core_dev *dev, int vector, int *eqn,
+			  unsigned int *irqn)
 {
 	struct mlx5_eq_table *table = dev->priv.eq_table;
 	struct mlx5_eq_comp *eq, *n;
@@ -869,8 +869,10 @@ int mlx5_vector2eqn(struct mlx5_core_dev *dev, int vector, int *eqn,
 
 	list_for_each_entry_safe(eq, n, &table->comp_eqs_list, list) {
 		if (i++ == vector) {
-			*eqn = eq->core.eqn;
-			*irqn = eq->core.irqn;
+			if (irqn)
+				*irqn = eq->core.irqn;
+			if (eqn)
+				*eqn = eq->core.eqn;
 			err = 0;
 			break;
 		}
@@ -878,7 +880,17 @@ int mlx5_vector2eqn(struct mlx5_core_dev *dev, int vector, int *eqn,
 
 	return err;
 }
+
+int mlx5_vector2eqn(struct mlx5_core_dev *dev, int vector, int *eqn)
+{
+	return vector2eqnirqn(dev, vector, eqn, NULL);
+}
 EXPORT_SYMBOL(mlx5_vector2eqn);
+
+int mlx5_vector2irqn(struct mlx5_core_dev *dev, int vector, unsigned int *irqn)
+{
+	return vector2eqnirqn(dev, vector, NULL, irqn);
+}
 
 unsigned int mlx5_comp_vectors_count(struct mlx5_core_dev *dev)
 {
@@ -926,13 +938,24 @@ void mlx5_core_eq_free_irqs(struct mlx5_core_dev *dev)
 	mutex_unlock(&table->lock);
 }
 
+#ifdef CONFIG_INFINIBAND_ON_DEMAND_PAGING
+#define MLX5_MAX_ASYNC_EQS 4
+#else
+#define MLX5_MAX_ASYNC_EQS 3
+#endif
+
 int mlx5_eq_table_create(struct mlx5_core_dev *dev)
 {
 	struct mlx5_eq_table *eq_table = dev->priv.eq_table;
+	int num_eqs = MLX5_CAP_GEN(dev, max_num_eqs) ?
+		      MLX5_CAP_GEN(dev, max_num_eqs) :
+		      1 << MLX5_CAP_GEN(dev, log_max_eq);
 	int err;
 
 	eq_table->num_comp_eqs =
-		mlx5_irq_get_num_comp(eq_table->irq_table);
+		min_t(int,
+		      mlx5_irq_get_num_comp(eq_table->irq_table),
+		      num_eqs - MLX5_MAX_ASYNC_EQS);
 
 	err = create_async_eqs(dev);
 	if (err) {

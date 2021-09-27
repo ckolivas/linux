@@ -770,6 +770,7 @@ struct bnxt_tx_ring_info {
 	u16			tx_prod;
 	u16			tx_cons;
 	u16			txq_index;
+	u8			kick_pending;
 	struct bnxt_db_info	tx_db;
 
 	struct tx_bd		*tx_desc_ring[MAX_TX_PAGES];
@@ -1435,6 +1436,21 @@ struct bnxt_ctx_pg_info {
 	struct bnxt_ctx_pg_info **ctx_pg_tbl;
 };
 
+#define BNXT_MAX_TQM_SP_RINGS		1
+#define BNXT_MAX_TQM_FP_RINGS		8
+#define BNXT_MAX_TQM_RINGS		\
+	(BNXT_MAX_TQM_SP_RINGS + BNXT_MAX_TQM_FP_RINGS)
+
+#define BNXT_SET_CTX_PAGE_ATTR(attr)					\
+do {									\
+	if (BNXT_PAGE_SIZE == 0x2000)					\
+		attr = FUNC_BACKING_STORE_CFG_REQ_SRQ_PG_SIZE_PG_8K;	\
+	else if (BNXT_PAGE_SIZE == 0x10000)				\
+		attr = FUNC_BACKING_STORE_CFG_REQ_QPC_PG_SIZE_PG_64K;	\
+	else								\
+		attr = FUNC_BACKING_STORE_CFG_REQ_QPC_PG_SIZE_PG_4K;	\
+} while (0)
+
 struct bnxt_ctx_mem_info {
 	u32	qp_max_entries;
 	u16	qp_min_qp1_entries;
@@ -1473,7 +1489,7 @@ struct bnxt_ctx_mem_info {
 	struct bnxt_ctx_pg_info stat_mem;
 	struct bnxt_ctx_pg_info mrav_mem;
 	struct bnxt_ctx_pg_info tim_mem;
-	struct bnxt_ctx_pg_info *tqm_mem[9];
+	struct bnxt_ctx_pg_info *tqm_mem[BNXT_MAX_TQM_RINGS];
 };
 
 struct bnxt_fw_health {

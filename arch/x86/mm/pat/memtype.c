@@ -583,7 +583,12 @@ int memtype_reserve(u64 start, u64 end, enum page_cache_mode req_type,
 	int err = 0;
 
 	start = sanitize_phys(start);
-	end = sanitize_phys(end);
+
+	/*
+	 * The end address passed into this function is exclusive, but
+	 * sanitize_phys() expects an inclusive address.
+	 */
+	end = sanitize_phys(end - 1) + 1;
 	if (start >= end) {
 		WARN(1, "%s failed: [mem %#010Lx-%#010Lx], req %s\n", __func__,
 				start, end - 1, cattr_name(req_type));
@@ -1164,12 +1169,14 @@ static void *memtype_seq_start(struct seq_file *seq, loff_t *pos)
 
 static void *memtype_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 {
+	kfree(v);
 	++*pos;
 	return memtype_get_idx(*pos);
 }
 
 static void memtype_seq_stop(struct seq_file *seq, void *v)
 {
+	kfree(v);
 }
 
 static int memtype_seq_show(struct seq_file *seq, void *v)
@@ -1180,8 +1187,6 @@ static int memtype_seq_show(struct seq_file *seq, void *v)
 			entry_print->start,
 			entry_print->end,
 			cattr_name(entry_print->type));
-
-	kfree(entry_print);
 
 	return 0;
 }

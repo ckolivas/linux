@@ -312,7 +312,7 @@ static ssize_t slots_show(struct device *dev, struct device_attribute *attr,
 	struct arm_pmu *cpu_pmu = container_of(pmu, struct arm_pmu, pmu);
 	u32 slots = cpu_pmu->reg_pmmir & ARMV8_PMU_SLOTS_MASK;
 
-	return snprintf(page, PAGE_SIZE, "0x%08x\n", slots);
+	return sysfs_emit(page, "0x%08x\n", slots);
 }
 
 static DEVICE_ATTR_RO(slots);
@@ -460,7 +460,7 @@ static inline int armv8pmu_counter_has_overflowed(u32 pmnc, int idx)
 	return pmnc & BIT(ARMV8_IDX_TO_COUNTER(idx));
 }
 
-static inline u32 armv8pmu_read_evcntr(int idx)
+static inline u64 armv8pmu_read_evcntr(int idx)
 {
 	u32 counter = ARMV8_IDX_TO_COUNTER(idx);
 

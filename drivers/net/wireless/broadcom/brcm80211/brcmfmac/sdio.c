@@ -4157,7 +4157,6 @@ static int brcmf_sdio_bus_reset(struct device *dev)
 	if (ret) {
 		brcmf_err("Failed to probe after sdio device reset: ret %d\n",
 			  ret);
-		brcmf_sdiod_remove(sdiodev);
 	}
 
 	return ret;
@@ -4541,6 +4540,7 @@ void brcmf_sdio_remove(struct brcmf_sdio *bus)
 		brcmf_sdiod_intr_unregister(bus->sdiodev);
 
 		brcmf_detach(bus->sdiodev->dev);
+		brcmf_free(bus->sdiodev->dev);
 
 		cancel_work_sync(&bus->datawork);
 		if (bus->brcmf_wq)

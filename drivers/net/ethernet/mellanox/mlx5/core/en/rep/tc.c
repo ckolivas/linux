@@ -298,9 +298,6 @@ mlx5e_rep_indr_block_priv_lookup(struct mlx5e_rep_priv *rpriv,
 {
 	struct mlx5e_rep_indr_block_priv *cb_priv;
 
-	/* All callback list access should be protected by RTNL. */
-	ASSERT_RTNL();
-
 	list_for_each_entry(cb_priv,
 			    &rpriv->uplink_priv.tc_indr_block_priv_list,
 			    list)
@@ -626,6 +623,11 @@ bool mlx5e_rep_tc_update_skb(struct mlx5_cqe64 *cqe,
 	if (!reg_c0)
 		return true;
 
+	/* If reg_c0 is not equal to the default flow tag then skb->mark
+	 * is not supported and must be reset back to 0.
+	 */
+	skb->mark = 0;
+
 	priv = netdev_priv(skb->dev);
 	esw = priv->mdev->priv.eswitch;
 
@@ -638,7 +640,7 @@ bool mlx5e_rep_tc_update_skb(struct mlx5_cqe64 *cqe,
 	}
 
 	if (chain) {
-		tc_skb_ext = skb_ext_add(skb, TC_SKB_EXT);
+		tc_skb_ext = tc_skb_ext_alloc(skb);
 		if (!tc_skb_ext) {
 			WARN_ON(1);
 			return false;

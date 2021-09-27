@@ -41,6 +41,7 @@
 #include <linux/nsproxy.h>
 #include <linux/slab.h>
 #include <linux/jhash.h>
+#include <linux/siphash.h>
 #include <net/net_namespace.h>
 #include <net/snmp.h>
 #include <net/ipv6.h>
@@ -258,34 +259,16 @@ static struct dst_ops ip6_dst_ops_template = {
 	.confirm_neigh		=	ip6_confirm_neigh,
 };
 
-static unsigned int ip6_blackhole_mtu(const struct dst_entry *dst)
-{
-	unsigned int mtu = dst_metric_raw(dst, RTAX_MTU);
-
-	return mtu ? : dst->dev->mtu;
-}
-
-static void ip6_rt_blackhole_update_pmtu(struct dst_entry *dst, struct sock *sk,
-					 struct sk_buff *skb, u32 mtu,
-					 bool confirm_neigh)
-{
-}
-
-static void ip6_rt_blackhole_redirect(struct dst_entry *dst, struct sock *sk,
-				      struct sk_buff *skb)
-{
-}
-
 static struct dst_ops ip6_dst_blackhole_ops = {
-	.family			=	AF_INET6,
-	.destroy		=	ip6_dst_destroy,
-	.check			=	ip6_dst_check,
-	.mtu			=	ip6_blackhole_mtu,
-	.default_advmss		=	ip6_default_advmss,
-	.update_pmtu		=	ip6_rt_blackhole_update_pmtu,
-	.redirect		=	ip6_rt_blackhole_redirect,
-	.cow_metrics		=	dst_cow_metrics_generic,
-	.neigh_lookup		=	ip6_dst_neigh_lookup,
+	.family			= AF_INET6,
+	.default_advmss		= ip6_default_advmss,
+	.neigh_lookup		= ip6_dst_neigh_lookup,
+	.check			= ip6_dst_check,
+	.destroy		= ip6_dst_destroy,
+	.cow_metrics		= dst_cow_metrics_generic,
+	.update_pmtu		= dst_blackhole_update_pmtu,
+	.redirect		= dst_blackhole_redirect,
+	.mtu			= dst_blackhole_mtu,
 };
 
 static const u32 ip6_template_metrics[RTAX_MAX] = {
@@ -1500,17 +1483,24 @@ static void rt6_exception_remove_oldest(struct rt6_exception_bucket *bucket)
 static u32 rt6_exception_hash(const struct in6_addr *dst,
 			      const struct in6_addr *src)
 {
-	static u32 seed __read_mostly;
-	u32 val;
+	static siphash_key_t rt6_exception_key __read_mostly;
+	struct {
+		struct in6_addr dst;
+		struct in6_addr src;
+	} __aligned(SIPHASH_ALIGNMENT) combined = {
+		.dst = *dst,
+	};
+	u64 val;
 
-	net_get_random_once(&seed, sizeof(seed));
-	val = jhash2((const u32 *)dst, sizeof(*dst)/sizeof(u32), seed);
+	net_get_random_once(&rt6_exception_key, sizeof(rt6_exception_key));
 
 #ifdef CONFIG_IPV6_SUBTREES
 	if (src)
-		val = jhash2((const u32 *)src, sizeof(*src)/sizeof(u32), val);
+		combined.src = *src;
 #endif
-	return hash_32(val, FIB6_EXCEPTION_BUCKET_SIZE_SHIFT);
+	val = siphash(&combined, sizeof(combined), &rt6_exception_key);
+
+	return hash_64(val, FIB6_EXCEPTION_BUCKET_SIZE_SHIFT);
 }
 
 /* Helper function to find the cached rt in the hash table
@@ -1665,6 +1655,7 @@ static int rt6_insert_exception(struct rt6_info *nrt,
 	struct in6_addr *src_key = NULL;
 	struct rt6_exception *rt6_ex;
 	struct fib6_nh *nh = res->nh;
+	int max_depth;
 	int err = 0;
 
 	spin_lock_bh(&rt6_exception_lock);
@@ -1719,7 +1710,9 @@ static int rt6_insert_exception(struct rt6_info *nrt,
 	bucket->depth++;
 	net->ipv6.rt6_stats->fib_rt_cache++;
 
-	if (bucket->depth > FIB6_MAX_DEPTH)
+	/* Randomize max depth to avoid some side channels attacks. */
+	max_depth = FIB6_MAX_DEPTH + prandom_u32_max(FIB6_MAX_DEPTH);
+	while (bucket->depth > max_depth)
 		rt6_exception_remove_oldest(bucket);
 
 out:
@@ -3658,7 +3651,7 @@ static struct fib6_info *ip6_route_info_create(struct fib6_config *cfg,
 		err = PTR_ERR(rt->fib6_metrics);
 		/* Do not leave garbage there. */
 		rt->fib6_metrics = (struct dst_metrics *)&dst_default_metrics;
-		goto out;
+		goto out_free;
 	}
 
 	if (cfg->fc_flags & RTF_ADDRCONF)
@@ -3689,11 +3682,11 @@ static struct fib6_info *ip6_route_info_create(struct fib6_config *cfg,
 	if (nh) {
 		if (rt->fib6_src.plen) {
 			NL_SET_ERR_MSG(extack, "Nexthops can not be used with source routing");
-			goto out;
+			goto out_free;
 		}
 		if (!nexthop_get(nh)) {
 			NL_SET_ERR_MSG(extack, "Nexthop has been deleted");
-			goto out;
+			goto out_free;
 		}
 		rt->nh = nh;
 		fib6_nh = nexthop_fib6_nh(rt->nh);
@@ -3729,6 +3722,10 @@ static struct fib6_info *ip6_route_info_create(struct fib6_config *cfg,
 	return rt;
 out:
 	fib6_info_release(rt);
+	return ERR_PTR(err);
+out_free:
+	ip_fib_metrics_put(rt->fib6_metrics);
+	kfree(rt);
 	return ERR_PTR(err);
 }
 
@@ -5221,9 +5218,11 @@ static int ip6_route_multipath_add(struct fib6_config *cfg,
 		 * nexthops have been replaced by first new, the rest should
 		 * be added to it.
 		 */
-		cfg->fc_nlinfo.nlh->nlmsg_flags &= ~(NLM_F_EXCL |
-						     NLM_F_REPLACE);
-		cfg->fc_nlinfo.nlh->nlmsg_flags |= NLM_F_CREATE;
+		if (cfg->fc_nlinfo.nlh) {
+			cfg->fc_nlinfo.nlh->nlmsg_flags &= ~(NLM_F_EXCL |
+							     NLM_F_REPLACE);
+			cfg->fc_nlinfo.nlh->nlmsg_flags |= NLM_F_CREATE;
+		}
 		nhn++;
 	}
 

@@ -79,7 +79,7 @@ struct rnbd_clt_session {
 	DECLARE_BITMAP(cpu_queues_bm, NR_CPUS);
 	int	__percpu	*cpu_rr; /* per-cpu var for CPU round-robin */
 	atomic_t		busy;
-	int			queue_depth;
+	size_t			queue_depth;
 	u32			max_io_size;
 	struct blk_mq_tag_set	tag_set;
 	struct mutex		lock; /* protects state and devs_list */
@@ -108,7 +108,7 @@ struct rnbd_clt_dev {
 	u32			clt_device_id;
 	struct mutex		lock;
 	enum rnbd_clt_dev_state	dev_state;
-	char			pathname[NAME_MAX];
+	char			*pathname;
 	enum rnbd_access_mode	access_mode;
 	bool			read_only;
 	bool			rotational;
@@ -126,7 +126,7 @@ struct rnbd_clt_dev {
 	struct list_head        list;
 	struct gendisk		*gd;
 	struct kobject		kobj;
-	char			blk_symlink_name[NAME_MAX];
+	char			*blk_symlink_name;
 	refcount_t		refcount;
 	struct work_struct	unmap_on_rmmod_work;
 };

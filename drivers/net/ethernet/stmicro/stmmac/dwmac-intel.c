@@ -233,9 +233,11 @@ static void common_default_data(struct plat_stmmacenet_data *plat)
 static int intel_mgbe_common_data(struct pci_dev *pdev,
 				  struct plat_stmmacenet_data *plat)
 {
+	char clk_name[20];
 	int ret;
 	int i;
 
+	plat->phy_addr = -1;
 	plat->clk_csr = 5;
 	plat->has_gmac = 0;
 	plat->has_gmac4 = 1;
@@ -299,8 +301,10 @@ static int intel_mgbe_common_data(struct pci_dev *pdev,
 	plat->eee_usecs_rate = plat->clk_ptp_rate;
 
 	/* Set system clock */
+	sprintf(clk_name, "%s-%s", "stmmac", pci_name(pdev));
+
 	plat->stmmac_clk = clk_register_fixed_rate(&pdev->dev,
-						   "stmmac-clk", NULL, 0,
+						   clk_name, NULL, 0,
 						   plat->clk_ptp_rate);
 
 	if (IS_ERR(plat->stmmac_clk)) {
@@ -345,7 +349,6 @@ static int ehl_sgmii_data(struct pci_dev *pdev,
 			  struct plat_stmmacenet_data *plat)
 {
 	plat->bus_id = 1;
-	plat->phy_addr = 0;
 	plat->phy_interface = PHY_INTERFACE_MODE_SGMII;
 
 	plat->serdes_powerup = intel_serdes_powerup;
@@ -362,7 +365,6 @@ static int ehl_rgmii_data(struct pci_dev *pdev,
 			  struct plat_stmmacenet_data *plat)
 {
 	plat->bus_id = 1;
-	plat->phy_addr = 0;
 	plat->phy_interface = PHY_INTERFACE_MODE_RGMII;
 
 	return ehl_common_data(pdev, plat);
@@ -376,7 +378,7 @@ static int ehl_pse0_common_data(struct pci_dev *pdev,
 				struct plat_stmmacenet_data *plat)
 {
 	plat->bus_id = 2;
-	plat->phy_addr = 1;
+	plat->addr64 = 32;
 	return ehl_common_data(pdev, plat);
 }
 
@@ -408,7 +410,7 @@ static int ehl_pse1_common_data(struct pci_dev *pdev,
 				struct plat_stmmacenet_data *plat)
 {
 	plat->bus_id = 3;
-	plat->phy_addr = 1;
+	plat->addr64 = 32;
 	return ehl_common_data(pdev, plat);
 }
 
@@ -450,7 +452,6 @@ static int tgl_sgmii_data(struct pci_dev *pdev,
 			  struct plat_stmmacenet_data *plat)
 {
 	plat->bus_id = 1;
-	plat->phy_addr = 0;
 	plat->phy_interface = PHY_INTERFACE_MODE_SGMII;
 	plat->serdes_powerup = intel_serdes_powerup;
 	plat->serdes_powerdown = intel_serdes_powerdown;
@@ -725,6 +726,8 @@ static SIMPLE_DEV_PM_OPS(intel_eth_pm_ops, intel_eth_pci_suspend,
 #define PCI_DEVICE_ID_INTEL_EHL_PSE1_RGMII1G_ID		0x4bb0
 #define PCI_DEVICE_ID_INTEL_EHL_PSE1_SGMII1G_ID		0x4bb1
 #define PCI_DEVICE_ID_INTEL_EHL_PSE1_SGMII2G5_ID	0x4bb2
+#define PCI_DEVICE_ID_INTEL_TGLH_SGMII1G_0_ID		0x43ac
+#define PCI_DEVICE_ID_INTEL_TGLH_SGMII1G_1_ID		0x43a2
 #define PCI_DEVICE_ID_INTEL_TGL_SGMII1G_ID		0xa0ac
 
 static const struct pci_device_id intel_eth_pci_id_table[] = {
@@ -739,6 +742,8 @@ static const struct pci_device_id intel_eth_pci_id_table[] = {
 	{ PCI_DEVICE_DATA(INTEL, EHL_PSE1_SGMII1G_ID, &ehl_pse1_sgmii1g_info) },
 	{ PCI_DEVICE_DATA(INTEL, EHL_PSE1_SGMII2G5_ID, &ehl_pse1_sgmii1g_info) },
 	{ PCI_DEVICE_DATA(INTEL, TGL_SGMII1G_ID, &tgl_sgmii1g_info) },
+	{ PCI_DEVICE_DATA(INTEL, TGLH_SGMII1G_0_ID, &tgl_sgmii1g_info) },
+	{ PCI_DEVICE_DATA(INTEL, TGLH_SGMII1G_1_ID, &tgl_sgmii1g_info) },
 	{}
 };
 MODULE_DEVICE_TABLE(pci, intel_eth_pci_id_table);

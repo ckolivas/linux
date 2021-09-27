@@ -927,7 +927,9 @@ int mtk_pinconf_adv_pull_set(struct mtk_pinctrl *hw,
 			if (err)
 				return err;
 		} else {
-			return -ENOTSUPP;
+			err = mtk_pinconf_bias_set_rev1(hw, desc, pullup);
+			if (err)
+				err = mtk_pinconf_bias_set(hw, desc, pullup);
 		}
 	}
 

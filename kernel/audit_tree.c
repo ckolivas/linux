@@ -593,7 +593,6 @@ static void prune_tree_chunks(struct audit_tree *victim, bool tagged)
 		spin_lock(&hash_lock);
 	}
 	spin_unlock(&hash_lock);
-	put_tree(victim);
 }
 
 /*
@@ -602,6 +601,7 @@ static void prune_tree_chunks(struct audit_tree *victim, bool tagged)
 static void prune_one(struct audit_tree *victim)
 {
 	prune_tree_chunks(victim, false);
+	put_tree(victim);
 }
 
 /* trim the uncommitted chunks from tree */
@@ -1037,7 +1037,7 @@ static void evict_chunk(struct audit_chunk *chunk)
 
 static int audit_tree_handle_event(struct fsnotify_mark *mark, u32 mask,
 				   struct inode *inode, struct inode *dir,
-				   const struct qstr *file_name)
+				   const struct qstr *file_name, u32 cookie)
 {
 	return 0;
 }

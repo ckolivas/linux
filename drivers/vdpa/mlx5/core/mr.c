@@ -25,17 +25,6 @@ static int get_octo_len(u64 len, int page_shift)
 	return (npages + 1) / 2;
 }
 
-static void fill_sg(struct mlx5_vdpa_direct_mr *mr, void *in)
-{
-	struct scatterlist *sg;
-	__be64 *pas;
-	int i;
-
-	pas = MLX5_ADDR_OF(create_mkey_in, in, klm_pas_mtt);
-	for_each_sg(mr->sg_head.sgl, sg, mr->nsg, i)
-		(*pas) = cpu_to_be64(sg_dma_address(sg));
-}
-
 static void mlx5_set_access_mode(void *mkc, int mode)
 {
 	MLX5_SET(mkc, mkc, access_mode_1_0, mode & 0x3);
@@ -45,10 +34,18 @@ static void mlx5_set_access_mode(void *mkc, int mode)
 static void populate_mtts(struct mlx5_vdpa_direct_mr *mr, __be64 *mtt)
 {
 	struct scatterlist *sg;
+	int nsg = mr->nsg;
+	u64 dma_addr;
+	u64 dma_len;
+	int j = 0;
 	int i;
 
-	for_each_sg(mr->sg_head.sgl, sg, mr->nsg, i)
-		mtt[i] = cpu_to_be64(sg_dma_address(sg));
+	for_each_sg(mr->sg_head.sgl, sg, mr->nent, i) {
+		for (dma_addr = sg_dma_address(sg), dma_len = sg_dma_len(sg);
+		     nsg && dma_len;
+		     nsg--, dma_addr += BIT(mr->log_size), dma_len -= BIT(mr->log_size))
+			mtt[j++] = cpu_to_be64(dma_addr);
+	}
 }
 
 static int create_direct_mr(struct mlx5_vdpa_dev *mvdev, struct mlx5_vdpa_direct_mr *mr)
@@ -64,7 +61,6 @@ static int create_direct_mr(struct mlx5_vdpa_dev *mvdev, struct mlx5_vdpa_direct
 		return -ENOMEM;
 
 	MLX5_SET(create_mkey_in, in, uid, mvdev->res.uid);
-	fill_sg(mr, in);
 	mkc = MLX5_ADDR_OF(create_mkey_in, in, memory_key_mkey_entry);
 	MLX5_SET(mkc, mkc, lw, !!(mr->perm & VHOST_MAP_WO));
 	MLX5_SET(mkc, mkc, lr, !!(mr->perm & VHOST_MAP_RO));
@@ -276,9 +272,11 @@ static int map_direct_mr(struct mlx5_vdpa_dev *mvdev, struct mlx5_vdpa_direct_mr
 done:
 	mr->log_size = log_entity_size;
 	mr->nsg = nsg;
-	err = dma_map_sg_attrs(dma, mr->sg_head.sgl, mr->nsg, DMA_BIDIRECTIONAL, 0);
-	if (!err)
+	mr->nent = dma_map_sg_attrs(dma, mr->sg_head.sgl, mr->nsg, DMA_BIDIRECTIONAL, 0);
+	if (!mr->nent) {
+		err = -ENOMEM;
 		goto err_map;
+	}
 
 	err = create_direct_mr(mvdev, mr);
 	if (err)
@@ -456,11 +454,6 @@ out:
 	mutex_unlock(&mr->mkey_mtx);
 }
 
-static bool map_empty(struct vhost_iotlb *iotlb)
-{
-	return !vhost_iotlb_itree_first(iotlb, 0, U64_MAX);
-}
-
 int mlx5_vdpa_handle_set_map(struct mlx5_vdpa_dev *mvdev, struct vhost_iotlb *iotlb,
 			     bool *change_map)
 {
@@ -468,10 +461,6 @@ int mlx5_vdpa_handle_set_map(struct mlx5_vdpa_dev *mvdev, struct vhost_iotlb *io
 	int err = 0;
 
 	*change_map = false;
-	if (map_empty(iotlb)) {
-		mlx5_vdpa_destroy_mr(mvdev);
-		return 0;
-	}
 	mutex_lock(&mr->mkey_mtx);
 	if (mr->initialized) {
 		mlx5_vdpa_info(mvdev, "memory map update\n");
