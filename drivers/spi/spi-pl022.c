@@ -1723,12 +1723,13 @@ static int verify_controller_parameters(struct pl022 *pl022,
 				return -EINVAL;
 			}
 		} else {
-			if (chip_info->duplex != SSP_MICROWIRE_CHANNEL_FULL_DUPLEX)
+			if (chip_info->duplex != SSP_MICROWIRE_CHANNEL_FULL_DUPLEX) {
 				dev_err(&pl022->adev->dev,
 					"Microwire half duplex mode requested,"
 					" but this is only available in the"
 					" ST version of PL022\n");
-			return -EINVAL;
+				return -EINVAL;
+			}
 		}
 	}
 	return 0;
@@ -2314,13 +2315,13 @@ static int pl022_probe(struct amba_device *adev, const struct amba_id *id)
 	return status;
 }
 
-static int
+static void
 pl022_remove(struct amba_device *adev)
 {
 	struct pl022 *pl022 = amba_get_drvdata(adev);
 
 	if (!pl022)
-		return 0;
+		return;
 
 	/*
 	 * undo pm_runtime_put() in probe.  I assume that we're not
@@ -2335,7 +2336,6 @@ pl022_remove(struct amba_device *adev)
 	clk_disable_unprepare(pl022->clk);
 	amba_release_regions(adev);
 	tasklet_disable(&pl022->pump_transfers);
-	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP

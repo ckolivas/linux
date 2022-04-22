@@ -1009,6 +1009,18 @@ static inline bool __io_match_files(struct io_kiocb *req,
 		req->work.identity->files == files;
 }
 
+static void io_refs_resurrect(struct percpu_ref *ref, struct completion *compl)
+{
+	bool got = percpu_ref_tryget(ref);
+
+	/* already at zero, wait for ->release() */
+	if (!got)
+		wait_for_completion(compl);
+	percpu_ref_resurrect(ref);
+	if (got)
+		percpu_ref_put(ref);
+}
+
 static bool io_match_task(struct io_kiocb *head,
 			  struct task_struct *task,
 			  struct files_struct *files)
@@ -1544,6 +1556,7 @@ static void __io_queue_deferred(struct io_ring_ctx *ctx)
 
 static void io_flush_timeouts(struct io_ring_ctx *ctx)
 {
+	struct io_kiocb *req, *tmp;
 	u32 seq;
 
 	if (list_empty(&ctx->timeout_list))
@@ -1551,10 +1564,8 @@ static void io_flush_timeouts(struct io_ring_ctx *ctx)
 
 	seq = ctx->cached_cq_tail - atomic_read(&ctx->cq_timeouts);
 
-	do {
+	list_for_each_entry_safe(req, tmp, &ctx->timeout_list, timeout.list) {
 		u32 events_needed, events_got;
-		struct io_kiocb *req = list_first_entry(&ctx->timeout_list,
-						struct io_kiocb, timeout.list);
 
 		if (io_is_timeout_noseq(req))
 			break;
@@ -1571,9 +1582,8 @@ static void io_flush_timeouts(struct io_ring_ctx *ctx)
 		if (events_got < events_needed)
 			break;
 
-		list_del_init(&req->timeout.list);
 		io_kill_timeout(req, 0);
-	} while (!list_empty(&ctx->timeout_list));
+	}
 
 	ctx->cq_last_tm_flush = seq;
 }
@@ -2075,7 +2085,9 @@ static void io_req_task_cancel(struct callback_head *cb)
 	struct io_kiocb *req = container_of(cb, struct io_kiocb, task_work);
 	struct io_ring_ctx *ctx = req->ctx;
 
+	mutex_lock(&ctx->uring_lock);
 	__io_req_task_cancel(req, -ECANCELED);
+	mutex_unlock(&ctx->uring_lock);
 	percpu_ref_put(&ctx->refs);
 }
 
@@ -3206,13 +3218,15 @@ static ssize_t loop_rw_iter(int rw, struct io_kiocb *req, struct iov_iter *iter)
 				ret = nr;
 			break;
 		}
+		ret += nr;
 		if (!iov_iter_is_bvec(iter)) {
 			iov_iter_advance(iter, nr);
 		} else {
-			req->rw.len -= nr;
 			req->rw.addr += nr;
+			req->rw.len -= nr;
+			if (!req->rw.len)
+				break;
 		}
-		ret += nr;
 		if (nr != iovec.iov_len)
 			break;
 	}
@@ -4041,7 +4055,7 @@ static int io_add_buffers(struct io_provide_buf *pbuf, struct io_buffer **head)
 	int i, bid = pbuf->bid;
 
 	for (i = 0; i < pbuf->nbufs; i++) {
-		buf = kmalloc(sizeof(*buf), GFP_KERNEL);
+		buf = kmalloc(sizeof(*buf), GFP_KERNEL_ACCOUNT);
 		if (!buf)
 			break;
 
@@ -4056,6 +4070,7 @@ static int io_add_buffers(struct io_provide_buf *pbuf, struct io_buffer **head)
 		} else {
 			list_add_tail(&buf->list, &(*head)->list);
 		}
+		cond_resched();
 	}
 
 	return i ? i : -ENOMEM;
@@ -5559,7 +5574,7 @@ static int io_timeout_remove_prep(struct io_kiocb *req,
 		return -EINVAL;
 	if (unlikely(req->flags & (REQ_F_FIXED_FILE | REQ_F_BUFFER_SELECT)))
 		return -EINVAL;
-	if (sqe->ioprio || sqe->buf_index || sqe->len || sqe->timeout_flags |
+	if (sqe->ioprio || sqe->buf_index || sqe->len || sqe->timeout_flags ||
 	    sqe->splice_fd_in)
 		return -EINVAL;
 
@@ -5622,6 +5637,7 @@ static int io_timeout_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe,
 	else
 		data->mode = HRTIMER_MODE_REL;
 
+	INIT_LIST_HEAD(&req->timeout.list);
 	hrtimer_init(&data->timer, CLOCK_MONOTONIC, data->mode);
 	return 0;
 }
@@ -6265,12 +6281,12 @@ static enum hrtimer_restart io_link_timeout_fn(struct hrtimer *timer)
 	if (!list_empty(&req->link_list)) {
 		prev = list_entry(req->link_list.prev, struct io_kiocb,
 				  link_list);
-		if (refcount_inc_not_zero(&prev->refs))
-			list_del_init(&req->link_list);
-		else
+		list_del_init(&req->link_list);
+		if (!refcount_inc_not_zero(&prev->refs))
 			prev = NULL;
 	}
 
+	list_del(&req->timeout.list);
 	spin_unlock_irqrestore(&ctx->completion_lock, flags);
 
 	if (prev) {
@@ -7329,10 +7345,15 @@ static int __io_sqe_files_scm(struct io_ring_ctx *ctx, int nr, int offset)
 		refcount_add(skb->truesize, &sk->sk_wmem_alloc);
 		skb_queue_head(&sk->sk_receive_queue, skb);
 
-		for (i = 0; i < nr_files; i++)
-			fput(fpl->fp[i]);
+		for (i = 0; i < nr; i++) {
+			struct file *file = io_file_from_index(ctx, i + offset);
+
+			if (file)
+				fput(file);
+		}
 	} else {
 		kfree_skb(skb);
+		free_uid(fpl->user);
 		kfree(fpl);
 	}
 
@@ -8757,9 +8778,10 @@ static void io_uring_cancel_task_requests(struct io_ring_ctx *ctx,
 	io_cancel_defer_files(ctx, task, files);
 	io_cqring_overflow_flush(ctx, true, task, files);
 
-	io_uring_cancel_files(ctx, task, files);
 	if (!files)
 		__io_uring_cancel_task_requests(ctx, task);
+	else
+		io_uring_cancel_files(ctx, task, files);
 
 	if ((ctx->flags & IORING_SETUP_SQPOLL) && ctx->sq_data) {
 		atomic_dec(&task->io_uring->in_idle);
@@ -9753,12 +9775,11 @@ static int __io_uring_register(struct io_ring_ctx *ctx, unsigned opcode,
 			if (ret < 0)
 				break;
 		} while (1);
-
 		mutex_lock(&ctx->uring_lock);
 
 		if (ret) {
-			percpu_ref_resurrect(&ctx->refs);
-			goto out_quiesce;
+			io_refs_resurrect(&ctx->refs, &ctx->ref_comp);
+			return ret;
 		}
 	}
 
@@ -9851,7 +9872,6 @@ out:
 	if (io_register_op_must_quiesce(opcode)) {
 		/* bring the ctx back to life */
 		percpu_ref_reinit(&ctx->refs);
-out_quiesce:
 		reinit_completion(&ctx->ref_comp);
 	}
 	return ret;

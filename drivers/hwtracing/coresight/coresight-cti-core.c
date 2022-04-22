@@ -174,7 +174,7 @@ static int cti_disable_hw(struct cti_drvdata *drvdata)
 	coresight_disclaim_device_unlocked(drvdata->base);
 	CS_LOCK(drvdata->base);
 	spin_unlock(&drvdata->spinlock);
-	pm_runtime_put(dev);
+	pm_runtime_put(dev->parent);
 	return 0;
 
 	/* not disabled this call */
@@ -836,7 +836,7 @@ static void cti_device_release(struct device *dev)
 	if (drvdata->csdev_release)
 		drvdata->csdev_release(dev);
 }
-static int cti_remove(struct amba_device *adev)
+static void cti_remove(struct amba_device *adev)
 {
 	struct cti_drvdata *drvdata = dev_get_drvdata(&adev->dev);
 
@@ -845,8 +845,6 @@ static int cti_remove(struct amba_device *adev)
 	mutex_unlock(&ect_mutex);
 
 	coresight_unregister(drvdata->csdev);
-
-	return 0;
 }
 
 static int cti_probe(struct amba_device *adev, const struct amba_id *id)
