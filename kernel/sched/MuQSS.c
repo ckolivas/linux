@@ -2331,7 +2331,7 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	return 0;
 }
 
-void sched_post_fork(struct task_struct *p)
+void sched_post_fork(struct task_struct *p, struct kernel_clone_args *kargs)
 {
 }
 
