@@ -5195,6 +5195,7 @@ intel_crtc_prepare_cleared_state(struct intel_atomic_state *state,
 	 * only fields that are know to not cause problems are preserved. */
 
 	saved_state->uapi = crtc_state->uapi;
+	saved_state->inherited = crtc_state->inherited;
 	saved_state->scaler_state = crtc_state->scaler_state;
 	saved_state->shared_dpll = crtc_state->shared_dpll;
 	saved_state->dpll_hw_state = crtc_state->dpll_hw_state;
@@ -5947,6 +5948,10 @@ int intel_modeset_all_pipes(struct intel_atomic_state *state,
 
 		ret = drm_atomic_add_affected_connectors(&state->base,
 							 &crtc->base);
+		if (ret)
+			return ret;
+
+		ret = intel_dp_mst_add_topology_state_for_crtc(state, crtc);
 		if (ret)
 			return ret;
 

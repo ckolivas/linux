@@ -162,8 +162,15 @@ void intel_gt_mcr_init(struct intel_gt *gt)
 	if (MEDIA_VER(i915) >= 13 && gt->type == GT_MEDIA) {
 		gt->steering_table[OADDRM] = xelpmp_oaddrm_steering_table;
 	} else if (GRAPHICS_VER_FULL(i915) >= IP_VER(12, 70)) {
-		fuse = REG_FIELD_GET(GT_L3_EXC_MASK,
-				     intel_uncore_read(gt->uncore, XEHP_FUSE4));
+		/* Wa_14016747170 */
+		if (IS_MTL_GRAPHICS_STEP(i915, M, STEP_A0, STEP_B0) ||
+		    IS_MTL_GRAPHICS_STEP(i915, P, STEP_A0, STEP_B0))
+			fuse = REG_FIELD_GET(MTL_GT_L3_EXC_MASK,
+					     intel_uncore_read(gt->uncore,
+							       MTL_GT_ACTIVITY_FACTOR));
+		else
+			fuse = REG_FIELD_GET(GT_L3_EXC_MASK,
+					     intel_uncore_read(gt->uncore, XEHP_FUSE4));
 
 		/*
 		 * Despite the register field being named "exclude mask" the
@@ -457,11 +464,14 @@ static bool reg_needs_read_steering(struct intel_gt *gt,
 				    i915_mcr_reg_t reg,
 				    enum intel_steering_type type)
 {
-	const u32 offset = i915_mmio_reg_offset(reg);
+	u32 offset = i915_mmio_reg_offset(reg);
 	const struct intel_mmio_range *entry;
 
 	if (likely(!gt->steering_table[type]))
 		return false;
+
+	if (IS_GSI_REG(offset))
+		offset += gt->uncore->gsi_offset;
 
 	for (entry = gt->steering_table[type]; entry->end; entry++) {
 		if (offset >= entry->start && offset <= entry->end)
