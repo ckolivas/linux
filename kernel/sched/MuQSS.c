@@ -7920,10 +7920,12 @@ static void __init select_leaders(void)
  * sched_init_smp() runs (hotplug kthreads, RCU, early kworkers), so the
  * skiplist must be drained onto the leader before its storage is freed.
  *
- * Lock handoff: reassign rq->lock to the leader *before* dropping the
- * follower's private lock, so new lockers never see a freed pointer.  Then
- * re-acquire/drop the old lock once to wait out any remote CPU that spun on
- * it, and only then free.
+ * Lock handoff: rq_lock() is a plain raw_spin_lock(rq->lock) with no re-check,
+ * so a CPU that had already read the follower's lock pointer would acquire the
+ * old lock after we drop it and then walk the leader's skiplist without the
+ * leader's lock.  share_rqs() therefore runs from stop_machine(), where no
+ * other CPU can be inside or waiting on any rq lock, which is what makes
+ * repointing rq->lock and freeing the old one safe.
  */
 static void __init share_and_free_rq(struct rq *leader, struct rq *rq)
 {
@@ -7958,27 +7960,17 @@ static void __init share_and_free_rq(struct rq *leader, struct rq *rq)
 	 */
 	WARN_ON_ONCE(rq->sl->entries != 0);
 
-	/*
-	 * Publish shared state while still holding old_lock.  Remote CPUs
-	 * that load rq->lock after this take the leader lock; those already
-	 * spinning on old_lock continue until we drop it below.
-	 */
+	/* Point the follower at the leader's skiplist and lock. */
 	rq->node = leader->node;
 	rq->sl = leader->sl;
 	rq->lock = leader->lock;
 	rq->is_leader = false;
-	/*
-	 * Pair with remote rq_lock(): ensure rq->lock is visible before
-	 * old_lock is released.
-	 */
-	smp_wmb();
 
-	do_raw_spin_unlock(old_lock);
 	/*
-	 * Drain any remote holder that acquired old_lock after our unlock.
-	 * Once we take and drop it again, no CPU can still hold it.
+	 * Drop the follower's private lock, taken by lock_all_rqs().  Only the
+	 * leader lock remains held for @rq, and nothing can be waiting on the
+	 * old one, so free it.
 	 */
-	do_raw_spin_lock(old_lock);
 	do_raw_spin_unlock(old_lock);
 
 	kfree(old_node);
@@ -8046,6 +8038,21 @@ static inline void unlock_leader_rqs(void)
 			do_raw_spin_unlock(rq->lock);
 	}
 	preempt_enable();
+}
+
+/*
+ * Fold the runqueues from stop_machine() context.  Every other CPU is parked
+ * in the stopper with interrupts disabled, so none of them is inside an rq
+ * lock or spinning on one while share_and_free_rq() repoints a follower's
+ * rq->lock at its leader and frees the old lock.  Any single CPU can run this.
+ */
+static int __init share_rqs_stopper(void *unused)
+{
+	lock_all_rqs();
+	share_rqs();
+	unlock_leader_rqs();
+
+	return 0;
 }
 
 static void __init setup_rq_orders(void)
@@ -8176,7 +8183,8 @@ void __init sched_init_smp(void)
 	/*
 	 * Take the sleeping lock before disabling interrupts - the 5.12 order
 	 * trips "sleeping function called from invalid context" under
-	 * CONFIG_DEBUG_ATOMIC_SLEEP.
+	 * CONFIG_DEBUG_ATOMIC_SLEEP.  select_leaders() walks the domain tree,
+	 * which is what the mutex is for.
 	 */
 	mutex_lock(&sched_domains_mutex);
 	local_irq_disable();
@@ -8186,17 +8194,21 @@ void __init sched_init_smp(void)
 		num_possible_cpus(), num_present_cpus(), num_online_cpus());
 
 	select_leaders();
-	/*
-	 * Share runqueues before dropping the locks.  7.1 has already started
-	 * secondary CPUs and may have tasks on their private skiplists; doing
-	 * this unlocked races with those CPUs and can free a live skiplist.
-	 */
-	share_rqs();
 
-	unlock_leader_rqs();
+	unlock_all_rqs();
 	local_irq_enable();
-
 	mutex_unlock(&sched_domains_mutex);
+
+	/*
+	 * Only now fold the runqueues together, and do it from stop_machine():
+	 * 7.1 has the secondary CPUs running by this point, so a follower's rq
+	 * lock can be held - or waited on - by another CPU exactly while it is
+	 * handed over to the leader and freed.  Quiescing everybody closes that
+	 * window without putting a re-check in the rq_lock() fast path.  Note
+	 * stop_machine() takes cpus_read_lock(), so it must not nest inside
+	 * sched_domains_mutex.
+	 */
+	stop_machine(share_rqs_stopper, NULL, cpumask_of(raw_smp_processor_id()));
 
 	setup_rq_orders();
 
