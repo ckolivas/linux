@@ -1938,12 +1938,21 @@ static int valid_task_cpu(struct task_struct *p)
 {
 	cpumask_t valid_mask;
 
+	/*
+	 * Kthreads may be bound to a CPU that is not yet online (per-CPU
+	 * hotplug threads created during smp_init). Placement for running
+	 * must still pick an online CPU — sched_other_cpu() allows them to
+	 * be selected despite the affinity mismatch until their CPU is up.
+	 * Userspace tasks are restricted to the active mask as usual.
+	 */
 	if (p->flags & PF_KTHREAD)
-		cpumask_and(&valid_mask, p->cpus_ptr, cpu_all_mask);
+		cpumask_and(&valid_mask, p->cpus_ptr, cpu_online_mask);
 	else
 		cpumask_and(&valid_mask, p->cpus_ptr, cpu_active_mask);
 
 	if (unlikely(!cpumask_weight(&valid_mask))) {
+		if ((p->flags & PF_KTHREAD) && num_online_cpus())
+			return cpumask_any(cpu_online_mask);
 		/* We shouldn't be hitting this any more */
 		printk(KERN_WARNING "SCHED: No cpumask for %s/%d weight %d\n", p->comm,
 		       p->pid, cpumask_weight(p->cpus_ptr));
@@ -1987,8 +1996,15 @@ static inline int select_best_cpu(struct task_struct *p)
 		idlest = entries;
 		rq = other_rq;
 	}
-	if (unlikely(!rq))
+	if (unlikely(!rq)) {
+		/*
+		 * Affinity may contain only offline CPUs (hotplug kthreads
+		 * bound before their CPU is up). Never place a wakeup there.
+		 */
+		if (unlikely(!cpu_online(task_cpu(p))))
+			return valid_task_cpu(p);
 		return task_cpu(p);
+	}
 	return rq->cpu;
 }
 #else /* CONFIG_SMP */
@@ -6624,7 +6640,12 @@ __do_set_cpus_allowed(struct task_struct *p, struct affinity_context *ctx)
 
 	lockdep_assert_held(&p->pi_lock);
 
-	cpumask_copy(&p->cpus_mask, ctx->new_mask);
+	/*
+	 * Keep cpus_mask and nr_cpus_allowed in lockstep. sched_other_cpu()
+	 * relies on nr_cpus_allowed == 1 to allow hotplug kthreads bound to
+	 * offline CPUs to still be picked on an online runqueue.
+	 */
+	set_cpus_allowed_common(p, ctx);
 
 	if (task_queued(p)) {
 		/*
@@ -7627,23 +7648,54 @@ static void __init select_leaders(void)
 	}
 }
 
-/* FIXME freeing locked spinlock */
+/*
+ * Fold @rq into @leader while all runqueue locks are already held by
+ * lock_all_rqs().  Secondary CPUs may already have tasks queued by the time
+ * sched_init_smp() runs (hotplug kthreads, RCU, early kworkers), so the
+ * skiplist must be drained onto the leader before its storage is freed.
+ * The follower's private lock is unlocked and freed; its lock pointer is
+ * then switched to the still-held leader lock.
+ */
 static void __init share_and_free_rq(struct rq *leader, struct rq *rq)
 {
-	WARN_ON(rq->nr_running > 0);
+	raw_spinlock_t *old_lock = rq->lock;
+
+	/* Move every queued task onto the leader skiplist. */
+	while (rq->sl->entries > 0) {
+		struct task_struct *p = rq->node->next[0]->value;
+
+		dequeue_task(rq, p, DEQUEUE_SAVE);
+		enqueue_task(leader, p, ENQUEUE_RESTORE);
+	}
+
+	/*
+	 * A non-idle curr is not on the skiplist but still accounts for one
+	 * nr_running.  Leave that count on @rq; only the shared skiplist and
+	 * lock are merged.
+	 */
+	WARN_ON_ONCE(rq->sl->entries != 0);
+
+	/*
+	 * Drop the follower's private lock before freeing it.  lock_all_rqs()
+	 * took it; after this only the leader lock remains held for @rq.
+	 */
+	do_raw_spin_unlock(old_lock);
 
 	kfree(rq->node);
 	kfree(rq->sl);
-	kfree(rq->lock);
+	kfree(old_lock);
 	rq->node = leader->node;
 	rq->sl = leader->sl;
 	rq->lock = leader->lock;
 	rq->is_leader = false;
 	barrier();
-	/* To make up for not unlocking the freed runlock */
-	preempt_enable();
 }
 
+/*
+ * Called with every runqueue lock held via lock_all_rqs() and IRQs off.
+ * Must not take locks again.  After this, only leader rqs own a unique lock;
+ * unlock_all_rqs() is replaced by unlock_leader_rqs().
+ */
 static void __init share_rqs(void)
 {
 	struct rq *rq, *leader;
@@ -7653,13 +7705,11 @@ static void __init share_rqs(void)
 		rq = cpu_rq(cpu);
 		leader = rq->smp_leader;
 
-		rq_lock(rq);
 		if (leader && rq != leader) {
 			printk(KERN_INFO "MuQSS sharing SMP runqueue from CPU %d to CPU %d\n",
 			       leader->cpu, rq->cpu);
 			share_and_free_rq(leader, rq);
-		} else
-			rq_unlock(rq);
+		}
 	}
 
 #ifdef CONFIG_SCHED_MC
@@ -7667,13 +7717,11 @@ static void __init share_rqs(void)
 		rq = cpu_rq(cpu);
 		leader = rq->mc_leader;
 
-		rq_lock(rq);
 		if (leader && rq != leader) {
 			printk(KERN_INFO "MuQSS sharing MC runqueue from CPU %d to CPU %d\n",
 			       leader->cpu, rq->cpu);
 			share_and_free_rq(leader, rq);
-		} else
-			rq_unlock(rq);
+		}
 	}
 #endif /* CONFIG_SCHED_MC */
 
@@ -7682,15 +7730,27 @@ static void __init share_rqs(void)
 		rq = cpu_rq(cpu);
 		leader = rq->smt_leader;
 
-		rq_lock(rq);
 		if (leader && rq != leader) {
 			printk(KERN_INFO "MuQSS sharing SMT runqueue from CPU %d to CPU %d\n",
 			       leader->cpu, rq->cpu);
 			share_and_free_rq(leader, rq);
-		} else
-			rq_unlock(rq);
+		}
 	}
 #endif /* CONFIG_SCHED_SMT */
+}
+
+/* Unlock each unique runqueue lock once after share_rqs(). */
+static inline void unlock_leader_rqs(void)
+{
+	int cpu;
+
+	for_each_possible_cpu(cpu) {
+		struct rq *rq = cpu_rq(cpu);
+
+		if (rq->is_leader)
+			do_raw_spin_unlock(rq->lock);
+	}
+	preempt_enable();
 }
 
 static void __init setup_rq_orders(void)
@@ -7826,11 +7886,15 @@ void __init sched_init_smp(void)
 		num_possible_cpus(), num_present_cpus(), num_online_cpus());
 
 	select_leaders();
-
-	unlock_all_rqs();
-	mutex_unlock(&sched_domains_mutex);
-
+	/*
+	 * Share runqueues before dropping the locks.  7.1 has already started
+	 * secondary CPUs and may have tasks on their private skiplists; doing
+	 * this unlocked races with those CPUs and can free a live skiplist.
+	 */
 	share_rqs();
+
+	unlock_leader_rqs();
+	mutex_unlock(&sched_domains_mutex);
 
 	local_irq_enable();
 
