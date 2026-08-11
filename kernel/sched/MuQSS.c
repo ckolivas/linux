@@ -818,7 +818,8 @@ static void dequeue_task(struct rq *rq, struct task_struct *p, int flags)
 
 	if (!(flags & DEQUEUE_SAVE)) {
 		sched_info_dequeue(rq, p);
-		psi_dequeue(p, flags & DEQUEUE_SLEEP);
+		/* Pass full flags: DEQUEUE_SLEEP vs migration clear all state. */
+		psi_dequeue(p, flags);
 	}
 	rq->nr_running--;
 	if (rt_task(p))
@@ -917,7 +918,8 @@ static void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
 	update_clocks(rq);
 	if (!(flags & ENQUEUE_RESTORE)) {
 		sched_info_enqueue(rq, p);
-		psi_enqueue(p, flags & ENQUEUE_WAKEUP);
+		/* Full flags so ENQUEUE_MIGRATED is visible to psi_enqueue(). */
+		psi_enqueue(p, flags);
 	}
 
 	randseed = (rq->niffies >> 10) & 0xFFFFFFFF;
@@ -1397,13 +1399,29 @@ void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 static inline void take_task(struct rq *rq, int cpu, struct task_struct *p)
 {
 	struct rq *p_rq = task_rq(p);
+	unsigned int old_cpu = task_cpu(p);
 
 	dequeue_task(p_rq, p, DEQUEUE_SAVE);
 	if (p_rq != rq) {
 		sched_info_dequeue(p_rq, p);
 		sched_info_enqueue(rq, p);
 	}
-	set_task_cpu(p, cpu);
+	/*
+	 * PSI keeps per-CPU runnable counters. take_task() skips the usual
+	 * dequeue/enqueue pair (SAVE/RESTORE), so when the physical CPU
+	 * changes we must migrate TSK_RUNNING (and friends) ourselves or
+	 * the next sleep clears them on the wrong CPU → underflow.
+	 * Leave TSK_ONCPU to psi_sched_switch().
+	 */
+	if (old_cpu != cpu && p->psi_flags & ~TSK_ONCPU) {
+		unsigned int migrate = p->psi_flags & ~TSK_ONCPU;
+
+		psi_task_change(p, migrate, 0);
+		set_task_cpu(p, cpu);
+		psi_task_change(p, 0, migrate);
+	} else {
+		set_task_cpu(p, cpu);
+	}
 }
 
 /*
@@ -7163,7 +7181,7 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 		}
 		set_task_cpu(p, dest_cpu);
 		if (queued)
-			enqueue_task(rq, p, 0);
+			enqueue_task(rq, p, ENQUEUE_MIGRATED);
 	}
 	if (queued)
 		try_preempt(p, rq);
@@ -7223,7 +7241,7 @@ static void bind_zero(int src_cpu)
 					dequeue_task(rq, p, 0);
 				set_task_cpu(p, 0);
 				if (queued)
-					enqueue_task(rq0, p, 0);
+					enqueue_task(rq0, p, ENQUEUE_MIGRATED);
 			}
 		}
 	}
