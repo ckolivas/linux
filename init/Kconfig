@@ -215,6 +215,8 @@ config THREAD_INFO_IN_TASK
 
 menu "General setup"
 
+source "kernel/Kconfig.MuQSS"
+
 config BROKEN
 	bool
 	help
@@ -884,6 +886,7 @@ menu "Scheduler features"
 config UCLAMP_TASK
 	bool "Enable utilization clamping for RT/FAIR tasks"
 	depends on CPU_FREQ_GOV_SCHEDUTIL
+	depends on !SCHED_MUQSS
 	help
 	  This feature enables the scheduler to track the clamped utilization
 	  of each CPU based on RUNNABLE tasks scheduled on that CPU.
@@ -932,6 +935,8 @@ config UCLAMP_BUCKETS_COUNT
 
 config SCHED_PROXY_EXEC
 	bool "Proxy Execution"
+	# MuQSS has no sched_class donor/proxy plumbing
+	depends on !SCHED_MUQSS
 	# Avoid some build failures w/ PREEMPT_RT until it can be fixed
 	depends on !PREEMPT_RT
 	# Need to investigate how to inform sched_ext of split contexts
@@ -1009,6 +1014,7 @@ config ARCH_WANT_NUMA_VARIABLE_LOCALITY
 
 config NUMA_BALANCING
 	bool "Memory placement aware NUMA scheduler"
+	depends on !SCHED_MUQSS
 	depends on ARCH_SUPPORTS_NUMA_BALANCING
 	depends on !ARCH_WANT_NUMA_VARIABLE_LOCALITY
 	depends on SMP && NUMA_MIGRATION && !PREEMPT_RT
@@ -1134,7 +1140,7 @@ menuconfig CGROUP_SCHED
 	  bandwidth allocation to such task groups. It uses cgroups to group
 	  tasks.
 
-if CGROUP_SCHED
+if CGROUP_SCHED && !SCHED_MUQSS
 config GROUP_SCHED_WEIGHT
 	def_bool n
 
@@ -1196,7 +1202,7 @@ config EXT_SUB_SCHED
 
 config SCHED_MM_CID
 	def_bool y
-	depends on SMP && RSEQ
+	depends on SMP && RSEQ && !SCHED_MUQSS
 
 config UCLAMP_TASK_GROUP
 	bool "Utilization clamping per group of tasks"
@@ -1323,6 +1329,7 @@ config CGROUP_DEVICE
 
 config CGROUP_CPUACCT
 	bool "Simple CPU accounting controller"
+	depends on !SCHED_MUQSS
 	help
 	  Provides a simple controller for monitoring the
 	  total CPU consumed by the tasks in a cgroup.
@@ -1468,6 +1475,7 @@ config CHECKPOINT_RESTORE
 
 config SCHED_AUTOGROUP
 	bool "Automatic process group scheduling"
+	depends on !SCHED_MUQSS
 	select CGROUPS
 	select CGROUP_SCHED
 	select FAIR_GROUP_SCHED
@@ -1977,6 +1985,7 @@ config RSEQ
 config RSEQ_SLICE_EXTENSION
 	bool "Enable rseq-based time slice extension mechanism"
 	depends on RSEQ && HIGH_RES_TIMERS && GENERIC_ENTRY && HAVE_GENERIC_TIF_BITS
+	depends on !SCHED_MUQSS
 	help
 	  Allows userspace to request a limited time slice extension when
 	  returning from an interrupt to user space via the RSEQ shared
