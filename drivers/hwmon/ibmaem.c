@@ -827,9 +827,8 @@ static ssize_t aem_show_power(struct device *dev,
 	time = ktime_get_ns();
 	before = data->energy[attr->index];
 
-	leftover = schedule_timeout_interruptible(
-			msecs_to_jiffies(data->power_period[attr->index])
-		   );
+	leftover = schedule_msec_hrtimeout_interruptible(
+			data->power_period[attr->index]);
 	if (leftover) {
 		mutex_unlock(&data->lock);
 		return 0;

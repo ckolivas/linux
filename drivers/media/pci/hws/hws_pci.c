@@ -215,7 +215,7 @@ static int main_ks_thread_handle(void *data)
 		/* If we're suspending, don't touch hardware; just sleep/freeze. */
 		if (READ_ONCE(pdx->suspended)) {
 			try_to_freeze();
-			schedule_timeout_interruptible(msecs_to_jiffies(1000));
+			schedule_msec_hrtimeout_interruptible(1000);
 			continue;
 		}
 
@@ -225,7 +225,7 @@ static int main_ks_thread_handle(void *data)
 		try_to_freeze(); /* cooperate with freezer each loop */
 
 		/* Sleep 1s or until signaled to wake/stop */
-		schedule_timeout_interruptible(msecs_to_jiffies(1000));
+		schedule_msec_hrtimeout_interruptible(1000);
 	}
 
 	dev_dbg(&pdx->pdev->dev, "%s: exiting\n", __func__);

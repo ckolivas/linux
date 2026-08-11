@@ -177,8 +177,7 @@ static int change_mode(struct parport *p, int m)
 				if (time_after_eq(jiffies, expire))
 					/* The FIFO is stuck. */
 					return -EBUSY;
-				schedule_timeout_interruptible(
-							msecs_to_jiffies(10));
+				schedule_msec_hrtimeout_interruptible(10);
 				if (signal_pending(current))
 					break;
 			}

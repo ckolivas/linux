@@ -1464,7 +1464,7 @@ int mei_me_polling_thread(void *_dev)
 						    MEI_POLLING_TIMEOUT_IDLE);
 		}
 
-		schedule_timeout_interruptible(msecs_to_jiffies(polling_timeout));
+		schedule_msec_hrtimeout_interruptible(polling_timeout);
 	}
 
 	return 0;

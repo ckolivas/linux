@@ -270,7 +270,7 @@ static int tee_submit_cmd(struct psp_tee_device *tee, enum tee_cmd_id cmd_id,
 
 		/* Wait if ring buffer is full or TEE is processing data */
 		mutex_unlock(&tee->rb_mgr.mutex);
-		schedule_timeout_interruptible(msecs_to_jiffies(10));
+		schedule_msec_hrtimeout_interruptible(10);
 		mutex_lock(&tee->rb_mgr.mutex);
 
 	} while (--nloop);

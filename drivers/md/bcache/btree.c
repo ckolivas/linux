@@ -1846,8 +1846,7 @@ static void bch_btree_gc(struct cache_set *c)
 		cond_resched();
 
 		if (ret == -EAGAIN)
-			schedule_timeout_interruptible(
-				msecs_to_jiffies(btree_gc_sleep_ms(c)));
+			schedule_msec_hrtimeout_interruptible(btree_gc_sleep_ms(c));
 		else if (ret)
 			pr_warn("gc failed!\n");
 	} while (ret && !test_bit(CACHE_SET_IO_DISABLE, &c->flags));

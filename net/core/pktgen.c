@@ -1993,7 +1993,7 @@ static ssize_t pktgen_thread_write(struct file *file,
 		mutex_lock(&pktgen_thread_lock);
 		t->control |= T_REMDEVALL;
 		mutex_unlock(&pktgen_thread_lock);
-		schedule_timeout_interruptible(msecs_to_jiffies(125));	/* Propagate thread->control  */
+		schedule_msec_hrtimeout_interruptible(125);	/* Propagate thread->control  */
 		ret = count;
 		sprintf(pg_result, "OK: rem_device_all");
 		goto out;
@@ -2065,7 +2065,7 @@ static void pktgen_mark_device(const struct pktgen_net *pn, const char *ifname)
 		mutex_unlock(&pktgen_thread_lock);
 		pr_debug("%s: waiting for %s to disappear....\n",
 			 __func__, ifname);
-		schedule_timeout_interruptible(msecs_to_jiffies(msec_per_try));
+		schedule_msec_hrtimeout_interruptible(msec_per_try);
 		mutex_lock(&pktgen_thread_lock);
 
 		if (++i >= max_tries) {
@@ -3324,7 +3324,7 @@ static void pktgen_run_all_threads(struct pktgen_net *pn)
 	pktgen_handle_all_threads(pn, T_RUN);
 
 	/* Propagate thread->control  */
-	schedule_timeout_interruptible(msecs_to_jiffies(125));
+	schedule_msec_hrtimeout_interruptible(125);
 
 	pktgen_wait_all_threads_run(pn);
 }
@@ -3336,7 +3336,7 @@ static void pktgen_reset_all_threads(struct pktgen_net *pn)
 	pktgen_handle_all_threads(pn, T_REMDEVALL);
 
 	/* Propagate thread->control  */
-	schedule_timeout_interruptible(msecs_to_jiffies(125));
+	schedule_msec_hrtimeout_interruptible(125);
 
 	pktgen_wait_all_threads_run(pn);
 }

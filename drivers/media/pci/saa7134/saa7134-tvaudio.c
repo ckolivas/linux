@@ -307,8 +307,7 @@ static int tvaudio_sleep(struct saa7134_dev *dev, int timeout)
 			set_current_state(TASK_INTERRUPTIBLE);
 			schedule();
 		} else {
-			schedule_timeout_interruptible
-						(msecs_to_jiffies(timeout));
+			schedule_msec_hrtimeout_interruptible(timeout);
 		}
 	}
 	return dev->thread.scan1 != dev->thread.scan2;

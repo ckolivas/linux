@@ -1247,7 +1247,7 @@ void esas2r_wait_request(struct esas2r_adapter *a, struct esas2r_request *rq)
 		if (rq->req_stat != RS_STARTED)
 			break;
 
-		schedule_timeout_interruptible(msecs_to_jiffies(100));
+		schedule_msec_hrtimeout_interruptible(100);
 
 		if ((jiffies_to_msecs(jiffies) - starttime) > timeout) {
 			esas2r_hdebug("request TMO");
