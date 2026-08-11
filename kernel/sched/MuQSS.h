@@ -39,6 +39,7 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/skip_list.h>
+#include <linux/smp.h>
 #include <linux/stop_machine.h>
 #include <linux/suspend.h>
 #include <linux/swait.h>
@@ -322,6 +323,15 @@ struct rq {
 
 #ifdef CONFIG_HIGH_RES_TIMERS
 	struct hrtimer hrexpiry_timer;
+	/*
+	 * Deferred start/cancel around __schedule() — same scheme as mainline
+	 * hrtick.  Reprogramming the oneshot clockevent from set_rq_task() on
+	 * every context switch under the rq lock starves TIMER_SOFTIRQ on SMP.
+	 */
+	call_single_data_t hrexpiry_csd;
+	unsigned int hrexpiry_sched;
+	s64 hrexpiry_delay;
+	ktime_t hrexpiry_time;
 #endif
 
 	int rt_nr_running; /* Number real time tasks running */

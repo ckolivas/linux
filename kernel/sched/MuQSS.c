@@ -56,6 +56,8 @@
 #include <linux/syscalls.h>
 #include <linux/tick.h>
 #include <linux/wait_bit.h>
+#include <linux/hrtimer_rearm.h>
+#include <linux/smp.h>
 
 #include <asm/irq_regs.h>
 #include <asm/switch_to.h>
@@ -2534,41 +2536,80 @@ static void account_task_cpu(struct rq *rq, struct task_struct *p)
 
 bool sched_smp_initialized __read_mostly;
 
+/*
+ * High-resolution timeslice expiry (MuQSS counterpart of mainline hrtick).
+ *
+ * Reprogramming a oneshot clockevent from set_rq_task() on every context
+ * switch under the rq lock races with the tick/timer softirq path on SMP
+ * and starves TIMER_SOFTIRQ (RCU "timer wakeup didn't happen").  Mirror
+ * mainline: HARD + LAZY_REARM setup, needs_rearm 5us threshold, and defer
+ * the actual start/cancel until hrexpiry_schedule_exit() after the pick.
+ */
+#ifdef CONFIG_HIGH_RES_TIMERS
+
+enum {
+	HREXPIRE_SCHED_NONE		= 0,
+	HREXPIRE_SCHED_DEFER		= BIT(1),
+	HREXPIRE_SCHED_START		= BIT(2),
+	HREXPIRE_SCHED_REARM_HRTIMER	= BIT(3),
+};
+
 static inline int hrexpiry_enabled(struct rq *rq)
 {
 	/*
-	 * Disabled for the 7.1 port.  Starting/canceling a non-HARD hrtimer
-	 * from set_rq_task() on every context switch reprograms the oneshot
-	 * clockevent under the rq lock; on SMP under highres that races with
-	 * the tick/timer softirq path and starves TIMER_SOFTIRQ (RCU GP
-	 * kthread "timer wakeup didn't happen").  Verified: highres=off (no
-	 * hrexpiry) boots 2-CPU reliably; with hrexpiry the hang is flaky but
-	 * frequent.  Mainline solved the same class of bug with hrtick +
-	 * HRTIMER_MODE_LAZY_REARM and deferred start/cancel around schedule().
-	 * Until MuQSS grows that deferral, fall back to tick/dither timeslice
-	 * expiry (rq_dither / task_running_tick).  System highres timers are
-	 * unaffected.
+	 * 5.12 used hrtimer_is_hres_active(); 7.1 exposes the same idea as
+	 * hrtimer_resolution != LOW_RES_NSEC once highres has switched on.
 	 */
-	return 0;
+	return hrtimer_resolution != LOW_RES_NSEC;
+}
+
+static inline bool hrexpiry_needs_rearm(struct hrtimer *timer, ktime_t expires)
+{
+	/*
+	 * Queued is false when not started or the callback is running.  If
+	 * already queued, only reprogram when the expiry moves substantially.
+	 */
+	return !hrtimer_is_queued(timer) ||
+		abs(expires - hrtimer_get_expires(timer)) > 5000;
+}
+
+static void hrexpiry_cond_restart(struct rq *rq)
+{
+	struct hrtimer *timer = &rq->hrexpiry_timer;
+	ktime_t time = rq->hrexpiry_time;
+
+	if (hrexpiry_needs_rearm(timer, time))
+		hrtimer_start(timer, time, HRTIMER_MODE_ABS_PINNED_HARD);
 }
 
 /*
- * Use HR-timers to deliver accurate preemption points.
- *
- * Must be safe under the runqueue lock with IRQs off: never use the blocking
- * hrtimer_cancel(), and use HARD|LAZY_REARM so we do not thrash the oneshot
- * clockevent on every context switch (that loses timer IRQs on SMP under
- * highres — RCU/timer softirq starvation).  Same rationale as mainline
- * hrtick + HRTIMER_MODE_LAZY_REARM.
+ * Remote start IPI — wake_up_new_task may shorten a parent on another CPU.
+ * Runs hardirq/IPI context; take the rq lock like mainline __hrtick_start.
  */
+static void __hrexpiry_start(void *arg)
+{
+	struct rq *rq = arg;
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(rq->lock, flags);
+	hrexpiry_cond_restart(rq);
+	raw_spin_unlock_irqrestore(rq->lock, flags);
+}
+
 static inline void hrexpiry_clear(struct rq *rq)
 {
 	if (!hrexpiry_enabled(rq))
 		return;
+
 	/*
-	 * try_to_cancel does not wait for a running callback, so it cannot
-	 * deadlock against the hardirq path while we hold the rq lock.
+	 * Inside __schedule() only drop a pending deferred start; the actual
+	 * cancel happens once in hrexpiry_schedule_exit().
 	 */
+	if (rq->hrexpiry_sched) {
+		rq->hrexpiry_sched &= ~HREXPIRE_SCHED_START;
+		return;
+	}
+
 	hrtimer_try_to_cancel(&rq->hrexpiry_timer);
 }
 
@@ -2586,9 +2627,8 @@ static enum hrtimer_restart hrexpiry(struct hrtimer *timer)
 		goto out;
 
 	/*
-	 * We're doing this without the runqueue lock but this should always
-	 * be run on the local CPU. Time slice should run out in __schedule
-	 * but we set it to zero here in case niffies is slightly less.
+	 * Local CPU only; no rq lock.  Force a reschedule when the slice
+	 * expires — __schedule() will pick the next deadline task.
 	 */
 	p = rq->curr;
 	p->time_slice = 0;
@@ -2598,37 +2638,88 @@ out:
 }
 
 /*
- * Called to set the hrexpiry timer state.
- *
- * Called with irqs disabled from the local CPU only, typically under the
- * runqueue lock from set_rq_task().
+ * Called with irqs disabled under the rq lock (set_rq_task / fork path).
+ * May target a remote rq — then arm via CSD like mainline hrtick_start.
  */
 static void hrexpiry_start(struct rq *rq, u64 delay)
 {
+	s64 delta;
+
 	if (!hrexpiry_enabled(rq))
 		return;
 
-	/*
-	 * Slices shorter than 10us are not useful and can DoS the timer
-	 * subsystem with reprogramming (same floor as mainline hrtick).
-	 */
-	if (delay < 10000ULL)
-		delay = 10000ULL;
+	/* Slices < 10us are not useful and can DoS the timer subsystem. */
+	delta = max_t(s64, delay, 10000LL);
 
 	/*
-	 * REL_PINNED_HARD: hardirq callback on this CPU.
-	 * LAZY_REARM was set at setup so restarting into the future does not
-	 * force a clockevent reprogram when we remain the first expiry.
+	 * Mid-schedule: note the delay and let hrexpiry_schedule_exit()
+	 * program the clockevent once.
 	 */
-	hrtimer_start(&rq->hrexpiry_timer, ns_to_ktime(delay),
-		      HRTIMER_MODE_REL_PINNED_HARD);
+	if (rq->hrexpiry_sched) {
+		rq->hrexpiry_sched |= HREXPIRE_SCHED_START;
+		rq->hrexpiry_delay = delta;
+		return;
+	}
+
+	rq->hrexpiry_time = ktime_add_ns(ktime_get(), delta);
+	if (!hrexpiry_needs_rearm(&rq->hrexpiry_timer, rq->hrexpiry_time))
+		return;
+
+	if (rq == this_rq())
+		hrtimer_start(&rq->hrexpiry_timer, rq->hrexpiry_time,
+			      HRTIMER_MODE_ABS_PINNED_HARD);
+	else
+		smp_call_function_single_async(cpu_of(rq), &rq->hrexpiry_csd);
+}
+
+static inline void hrexpiry_schedule_enter(struct rq *rq)
+{
+	rq->hrexpiry_sched = HREXPIRE_SCHED_DEFER;
+	if (hrtimer_test_and_clear_rearm_deferred())
+		rq->hrexpiry_sched |= HREXPIRE_SCHED_REARM_HRTIMER;
+}
+
+static inline void hrexpiry_schedule_exit(struct rq *rq)
+{
+	if (rq->hrexpiry_sched & HREXPIRE_SCHED_START) {
+		rq->hrexpiry_time = ktime_add_ns(ktime_get(), rq->hrexpiry_delay);
+		hrexpiry_cond_restart(rq);
+	} else if (rq->curr == rq->idle || rq->curr->policy == SCHED_FIFO) {
+		/*
+		 * No slice timer needed.  Local CPU, IRQs off: the HARD
+		 * callback cannot be running, so cancel is safe.
+		 */
+		if (hrtimer_is_queued(&rq->hrexpiry_timer))
+			hrtimer_cancel(&rq->hrexpiry_timer);
+	}
+
+	if (rq->hrexpiry_sched & HREXPIRE_SCHED_REARM_HRTIMER)
+		__hrtimer_rearm_deferred();
+
+	rq->hrexpiry_sched = HREXPIRE_SCHED_NONE;
 }
 
 static void init_rq_hrexpiry(struct rq *rq)
 {
+	INIT_CSD(&rq->hrexpiry_csd, __hrexpiry_start, rq);
+	rq->hrexpiry_sched = HREXPIRE_SCHED_NONE;
 	hrtimer_setup(&rq->hrexpiry_timer, hrexpiry, CLOCK_MONOTONIC,
 		      HRTIMER_MODE_REL_HARD | HRTIMER_MODE_LAZY_REARM);
 }
+
+#else /* !CONFIG_HIGH_RES_TIMERS */
+
+static inline int hrexpiry_enabled(struct rq *rq)
+{
+	return 0;
+}
+static inline void hrexpiry_clear(struct rq *rq) { }
+static inline void hrexpiry_start(struct rq *rq, u64 delay) { }
+static inline void hrexpiry_schedule_enter(struct rq *rq) { }
+static inline void hrexpiry_schedule_exit(struct rq *rq) { }
+static inline void init_rq_hrexpiry(struct rq *rq) { }
+
+#endif /* CONFIG_HIGH_RES_TIMERS */
 
 static inline int rq_dither(struct rq *rq)
 {
@@ -2871,6 +2962,11 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 	 * remote lock we're migrating it to before enabling them.
 	 */
 	if (unlikely(task_on_rq_migrating(prev))) {
+		/*
+		 * Program/cancel hrexpiry on this CPU before dropping its
+		 * rq lock; after the unlock `rq` may become the remote one.
+		 */
+		hrexpiry_schedule_exit(rq);
 		sched_info_dequeue(rq, prev);
 		/*
 		 * We move the ownership of prev to the new cpu now. ttwu can't
@@ -2894,8 +2990,11 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 			resched_if_idle(rq);
 		}
 		raw_spin_unlock(&prev->pi_lock);
+		raw_spin_unlock_irq(rq->lock);
+		return;
 	}
 #endif
+	hrexpiry_schedule_exit(rq);
 	raw_spin_unlock_irq(rq->lock);
 }
 
@@ -4362,6 +4461,12 @@ static void __sched notrace __schedule(bool preempt)
 	}
 #endif
 
+	/*
+	 * Defer hrexpiry start/cancel until we leave __schedule so we do not
+	 * thrash the oneshot clockevent under the rq lock (mainline hrtick).
+	 */
+	hrexpiry_schedule_enter(rq);
+
 	switch_count = &prev->nivcsw;
 
 	/*
@@ -4475,9 +4580,10 @@ static void __sched notrace __schedule(bool preempt)
 		psi_sched_switch(prev, next, !task_on_rq_queued(prev));
 
 		trace_sched_switch(preempt, prev, next, prev->__state);
-		context_switch(rq, prev, next); /* unlocks the rq */
+		context_switch(rq, prev, next); /* unlocks the rq via finish_lock_switch */
 	} else {
 		check_siblings(rq);
+		hrexpiry_schedule_exit(rq);
 		rq_unlock(rq);
 		local_irq_enable();
 	}
