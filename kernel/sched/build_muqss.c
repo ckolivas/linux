@@ -85,6 +85,9 @@
 #include "sched.h"
 #include "stats.h"
 
+/* psi.c needs wq_worker_last_func(); mainline gets this via sched.h. */
+#include "../workqueue_internal.h"
+
 /* Source code modules: */
 
 #include "clock.c"

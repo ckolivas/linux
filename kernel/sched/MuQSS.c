@@ -31,6 +31,8 @@
  * 		scheduler by Con Kolivas.
  *  2019-08-31  LLC bits by Eduards Bezverhijs
  */
+/* Out-of-line migrate_{disable,enable} for modules; see linux/sched.h. */
+#define INSTANTIATE_EXPORTED_MIGRATE_DISABLE
 #include <linux/sched/isolation.h>
 #include <linux/sched/loadavg.h>
 
@@ -75,6 +77,11 @@
 
 #include "MuQSS.h"
 #include "smp.h"
+
+/* Modules probe these; core.c exports the same set under CFS. */
+EXPORT_TRACEPOINT_SYMBOL_GPL(ipi_send_cpu);
+EXPORT_TRACEPOINT_SYMBOL_GPL(ipi_send_cpumask);
+EXPORT_TRACEPOINT_SYMBOL(sched_set_state_tp);
 
 #define rt_prio(prio)		unlikely((prio) < MAX_RT_PRIO)
 #define rt_task(p)		rt_prio((p)->prio)
@@ -1808,7 +1815,7 @@ static int ttwu_runnable(struct task_struct *p, int wake_flags)
 		ttwu_do_wakeup(rq, p, wake_flags);
 		ret = 1;
 	}
-	__task_rq_unlock(rq, NULL);
+	__task_rq_unlock(rq, p, NULL);
 
 	return ret;
 }
@@ -3901,7 +3908,7 @@ out_requeue:
 	 * to keep scheduler internal stats reasonably up to date.  But
 	 * first update state to reflect hotplug activity if required.
 	 */
-	os = atomic_fetch_add_unless(&twork->__state, -1, TICK_SCHED_REMOTE_RUNNING);
+	os = atomic_fetch_add_unless(&twork->state, -1, TICK_SCHED_REMOTE_RUNNING);
 	WARN_ON_ONCE(os == TICK_SCHED_REMOTE_OFFLINE);
 	if (os == TICK_SCHED_REMOTE_RUNNING)
 		queue_delayed_work(system_unbound_wq, dwork, HZ);
@@ -3912,13 +3919,13 @@ static void sched_tick_start(int cpu)
 	struct tick_work *twork;
 	int os;
 
-	if (housekeeping_cpu(cpu, HK_FLAG_TICK))
+	if (housekeeping_cpu(cpu, HK_TYPE_TICK))
 		return;
 
 	WARN_ON_ONCE(!tick_work_cpu);
 
 	twork = per_cpu_ptr(tick_work_cpu, cpu);
-	os = atomic_xchg(&twork->__state, TICK_SCHED_REMOTE_RUNNING);
+	os = atomic_xchg(&twork->state, TICK_SCHED_REMOTE_RUNNING);
 	WARN_ON_ONCE(os == TICK_SCHED_REMOTE_RUNNING);
 	if (os == TICK_SCHED_REMOTE_OFFLINE) {
 		twork->cpu = cpu;
@@ -3933,14 +3940,14 @@ static void sched_tick_stop(int cpu)
 	struct tick_work *twork;
 	int os;
 
-	if (housekeeping_cpu(cpu, HK_FLAG_TICK))
+	if (housekeeping_cpu(cpu, HK_TYPE_TICK))
 		return;
 
 	WARN_ON_ONCE(!tick_work_cpu);
 
 	twork = per_cpu_ptr(tick_work_cpu, cpu);
 	/* There cannot be competing actions, but don't rely on stop-machine. */
-	os = atomic_xchg(&twork->__state, TICK_SCHED_REMOTE_OFFLINING);
+	os = atomic_xchg(&twork->state, TICK_SCHED_REMOTE_OFFLINING);
 	WARN_ON_ONCE(os != TICK_SCHED_REMOTE_RUNNING);
 	/* Don't cancel, as this would mess up the state machine. */
 }
@@ -5224,7 +5231,7 @@ void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task)
 out_unlock:
 	/* Avoid rq from going away on us: */
 	preempt_disable();
-	__task_rq_unlock(rq, NULL);
+	__task_rq_unlock(rq, p, NULL);
 
 	preempt_enable();
 }
@@ -6854,7 +6861,7 @@ void do_set_cpus_allowed(struct task_struct *p, struct affinity_context *ctx)
 		rq = __task_rq_lock(p, NULL);
 		set_task_cpu(p, valid_task_cpu(p));
 		resched_task(p);
-		__task_rq_unlock(rq, NULL);
+		__task_rq_unlock(rq, p, NULL);
 	}
 }
 
@@ -8996,6 +9003,15 @@ unsigned long long nr_context_switches_cpu(int cpu)
 	return cpu_rq(cpu)->nr_switches;
 }
 
+/*
+ * External (non-sched/) callers cannot see task_on_rq_queued(); wrap it.
+ * Used by tick-sched nohz full path among others.
+ */
+bool sched_task_on_rq(struct task_struct *p)
+{
+	return task_on_rq_queued(p);
+}
+
 unsigned long get_wchan(struct task_struct *p)
 {
 	unsigned long ip = 0;
@@ -9107,6 +9123,22 @@ void ___migrate_enable(void)
 			       SCA_MIGRATE_ENABLE);
 }
 EXPORT_SYMBOL_GPL(___migrate_enable);
+
+/*
+ * Modules cannot see the runqueues layout, so export out-of-line wrappers
+ * (INSTANTIATE_EXPORTED_MIGRATE_DISABLE makes the inlines become externs).
+ */
+void migrate_disable(void)
+{
+	__migrate_disable();
+}
+EXPORT_SYMBOL_GPL(migrate_disable);
+
+void migrate_enable(void)
+{
+	__migrate_enable();
+}
+EXPORT_SYMBOL_GPL(migrate_enable);
 
 /*
  * MuQSS picks the CPU for a task at schedule() time rather than at exec, so

@@ -436,6 +436,20 @@ static inline int task_running(struct rq *rq, struct task_struct *p)
 #endif
 }
 
+/*
+ * Mainline name used by stats.h / psi.c / RT helpers. Equivalent to
+ * task_running() under SMP; always uses p->on_cpu so the @rq argument is
+ * unused (kept for API compatibility with mainline call sites).
+ */
+static inline int task_on_cpu(struct rq *rq, struct task_struct *p)
+{
+#ifdef CONFIG_SMP
+	return p->on_cpu;
+#else
+	return task_current(rq, p);
+#endif
+}
+
 static inline int task_on_rq_queued(struct task_struct *p)
 {
 	return p->on_rq == TASK_ON_RQ_QUEUED;
@@ -444,6 +458,11 @@ static inline int task_on_rq_queued(struct task_struct *p)
 static inline int task_on_rq_migrating(struct task_struct *p)
 {
 	return READ_ONCE(p->on_rq) == TASK_ON_RQ_MIGRATING;
+}
+
+static inline void lockdep_assert_rq_held(struct rq *rq)
+{
+	lockdep_assert_held(rq->lock);
 }
 
 static inline void rq_lock(struct rq *rq)
@@ -525,10 +544,30 @@ static inline struct rq *__task_rq_lock(struct task_struct *p, struct rq_flags _
 	return rq;
 }
 
-static inline void __task_rq_unlock(struct rq *rq, struct rq_flags __always_unused *rf)
+/*
+ * Match mainline's 3-arg signature (stats.h / psi paths pass @p). MuQSS does
+ * not pin the lock cookie, so @p and @rf are unused beyond API compatibility.
+ */
+static inline void __task_rq_unlock(struct rq *rq,
+				    struct task_struct __always_unused *p,
+				    struct rq_flags __always_unused *rf)
 {
 	rq_unlock(rq);
 }
+
+/*
+ * scoped_guard / guard(rq_lock_irq) used by psi_cgroup_restart() and similar.
+ * MuQSS rq_lock_irq takes only the rq (no pin cookie).
+ */
+DEFINE_LOCK_GUARD_1(rq_lock_irq, struct rq,
+		    rq_lock_irq(_T->lock),
+		    rq_unlock_irq(_T->lock, &_T->rf),
+		    struct rq_flags rf)
+
+DEFINE_LOCK_GUARD_1(rq_lock_irqsave, struct rq,
+		    rq_lock_irqsave(_T->lock, &_T->rf),
+		    rq_unlock_irqrestore(_T->lock, &_T->rf),
+		    struct rq_flags rf)
 
 static inline struct rq *
 this_rq_lock_irq(struct rq_flags *rf)
