@@ -1160,4 +1160,25 @@ extern unsigned long sugov_effective_cpu_perf(int cpu, unsigned long actual,
 extern int try_to_wake_up(struct task_struct *p, unsigned int state,
 			  int wake_flags);
 
+asmlinkage void schedule_user(void);
+extern void resched_cpu(int cpu);
+extern bool available_idle_cpu(int cpu);
+extern void do_set_cpus_allowed(struct task_struct *p,
+				struct affinity_context *ctx);
+extern void __do_set_cpus_allowed(struct task_struct *p,
+				  struct affinity_context *ctx);
+
+#ifdef CONFIG_PREEMPT_DYNAMIC
+extern int sched_dynamic_mode(const char *str);
+extern void sched_dynamic_update(int mode);
+#endif
+
+#ifdef CONFIG_CGROUP_SCHED
+extern struct task_group *sched_create_group(struct task_group *parent);
+extern void sched_online_group(struct task_group *tg,
+			       struct task_group *parent);
+extern void sched_destroy_group(struct task_group *tg);
+extern void sched_release_group(struct task_group *tg);
+#endif
+
 #endif /* MUQSS_SCHED_H */
