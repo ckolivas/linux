@@ -758,7 +758,7 @@ static int liquidio_watchdog(void *param)
 	while (!kthread_should_stop()) {
 		/* sleep for a couple of seconds so that we don't hog the CPU */
 		set_current_state(TASK_INTERRUPTIBLE);
-		schedule_timeout(msecs_to_jiffies(2000));
+		schedule_msec_hrtimeout(2000);
 
 		mask_of_crashed_or_stuck_cores =
 		    (u16)octeon_read_csr64(oct, CN23XX_SLI_SCRATCH2);

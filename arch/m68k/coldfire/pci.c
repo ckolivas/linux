@@ -226,7 +226,7 @@ static int __init mcf_pci_init(void)
 	/* Turn of PCI reset, and wait for devices to settle */
 	mcf_write32(0, PCIGSCR);
 	set_current_state(TASK_UNINTERRUPTIBLE);
-	schedule_timeout(msecs_to_jiffies(200));
+	schedule_msec_hrtimeout(200);
 
 
 	pci_add_resource(&bridge->windows, &ioport_resource);

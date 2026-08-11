@@ -1863,7 +1863,7 @@ snic_dr_clean_pending_req(struct snic *snic, struct scsi_cmnd *lr_sc)
 		}
 	}
 
-	schedule_timeout(msecs_to_jiffies(100));
+	schedule_msec_hrtimeout(100);
 
 	/* Walk through all the cmds and check abts status. */
 	if (snic_is_abts_pending(snic, lr_sc))
@@ -2321,7 +2321,7 @@ snic_reset(struct Scsi_Host *shost, struct scsi_cmnd *sc)
 
 	/* Wait for all the IOs that are entered in Qcmd */
 	while (atomic_read(&snic->ios_inflight))
-		schedule_timeout(msecs_to_jiffies(1));
+		schedule_msec_hrtimeout(1);
 
 	ret = snic_issue_hba_reset(snic, sc);
 	if (ret) {

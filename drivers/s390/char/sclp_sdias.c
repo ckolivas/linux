@@ -68,7 +68,7 @@ static int sdias_sclp_send(struct sclp_req *req)
 			/* not initiated, wait some time and retry */
 			set_current_state(TASK_INTERRUPTIBLE);
 			TRACE("add request failed: rc = %i\n",rc);
-			schedule_timeout(msecs_to_jiffies(500));
+			schedule_msec_hrtimeout(500);
 			continue;
 		}
 		/* initiated, wait for completion of service call */

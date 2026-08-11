@@ -1185,7 +1185,7 @@ retry:
 	if (creds < window->vas_win.wcreds_max) {
 		val = 0;
 		set_current_state(TASK_UNINTERRUPTIBLE);
-		schedule_timeout(msecs_to_jiffies(10));
+		schedule_msec_hrtimeout(10);
 		count++;
 		/*
 		 * Process can not close send window until all credits are
@@ -1218,7 +1218,7 @@ retry:
 	if (busy) {
 		val = 0;
 		set_current_state(TASK_UNINTERRUPTIBLE);
-		schedule_timeout(msecs_to_jiffies(10));
+		schedule_msec_hrtimeout(10);
 		count++;
 		/*
 		 * Takes around few milliseconds to process all pending

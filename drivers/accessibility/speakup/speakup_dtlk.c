@@ -221,7 +221,7 @@ static void do_catch_up(struct spk_synth *synth)
 		delay_time_val = delay_time->u.n.value;
 		spin_unlock_irqrestore(&speakup_info.spinlock, flags);
 		if (synth_full()) {
-			schedule_timeout(msecs_to_jiffies(delay_time_val));
+			schedule_msec_hrtimeout(delay_time_val);
 			continue;
 		}
 		set_current_state(TASK_RUNNING);
@@ -237,7 +237,7 @@ static void do_catch_up(struct spk_synth *synth)
 			delay_time_val = delay_time->u.n.value;
 			jiffy_delta_val = jiffy_delta->u.n.value;
 			spin_unlock_irqrestore(&speakup_info.spinlock, flags);
-			schedule_timeout(msecs_to_jiffies(delay_time_val));
+			schedule_msec_hrtimeout(delay_time_val);
 			jiff_max = jiffies + jiffy_delta_val;
 		}
 	}

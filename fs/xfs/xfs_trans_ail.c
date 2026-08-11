@@ -715,7 +715,7 @@ xfsaild(
 		spin_unlock(&ailp->ail_lock);
 
 		if (tout)
-			schedule_timeout(msecs_to_jiffies(tout));
+			schedule_msec_hrtimeout(tout);
 
 		__set_current_state(TASK_RUNNING);
 

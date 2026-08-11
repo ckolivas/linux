@@ -340,7 +340,7 @@ static int snd_hdac_bus_get_response_rirb(struct hdac_bus *bus,
 			break;
 #define LOOP_COUNT_MAX	3000
 		if (!bus->polling_mode) {
-			schedule_timeout(msecs_to_jiffies(2));
+			schedule_msec_hrtimeout(2);
 		} else if (bus->needs_damn_long_delay ||
 			   loopcounter > LOOP_COUNT_MAX) {
 			if (loopcounter > LOOP_COUNT_MAX && !warned) {

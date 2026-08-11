@@ -698,7 +698,7 @@ static int zilog_tx(struct rc_dev *rcdev, unsigned int *txbuf,
 	 */
 	for (i = 0; i < 20; ++i) {
 		set_current_state(TASK_UNINTERRUPTIBLE);
-		schedule_timeout(msecs_to_jiffies(50));
+		schedule_msec_hrtimeout(50);
 		ret = i2c_master_send(ir->tx_c, buf, 1);
 		if (ret == 1)
 			break;

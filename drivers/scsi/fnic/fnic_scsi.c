@@ -259,7 +259,7 @@ int fnic_fw_reset_handler(struct fnic *fnic)
 
 	/* wait for io cmpl */
 	while (atomic_read(&fnic->in_flight))
-		schedule_timeout(msecs_to_jiffies(1));
+		schedule_msec_hrtimeout(1);
 
 	spin_lock_irqsave(&fnic->wq_copy_lock[0], flags);
 
@@ -1650,7 +1650,7 @@ static void fnic_cleanup_io(struct fnic *fnic, int exclude_id)
 		  io_count,
 		  atomic64_read(&fnic->fnic_stats.io_stats.active_ios));
 
-		schedule_timeout(msecs_to_jiffies(100));
+		schedule_msec_hrtimeout(100);
 	}
 }
 
@@ -1937,7 +1937,7 @@ void fnic_rport_exch_reset(struct fnic *fnic, u32 port_id)
 	atomic_dec(&fnic->in_flight);
 
 	while ((io_count = fnic_count_ioreqs(fnic, port_id)))
-		schedule_timeout(msecs_to_jiffies(1000));
+		schedule_msec_hrtimeout(1000);
 
 	FNIC_SCSI_DBG(KERN_DEBUG, fnic,
 				  "rport: 0x%x remaining portid-io-count: %d ",
@@ -2535,7 +2535,7 @@ static int fnic_clean_pending_aborts(struct fnic *fnic,
 		ret = iter_data.ret;
 		goto clean_pending_aborts_end;
 	}
-	schedule_timeout(msecs_to_jiffies(2 * fnic->config.ed_tov));
+	schedule_msec_hrtimeout(2 * fnic->config.ed_tov);
 
 	/* walk again to check, if IOs are still pending in fw */
 	if (fnic_is_abts_pending(fnic, lr_sc))
@@ -2836,7 +2836,7 @@ fnic_device_reset_end:
 		}
 		FNIC_SCSI_DBG(KERN_ERR, fnic,
 					  "Cannot clean up all IOs for the LUN\n");
-		schedule_timeout(msecs_to_jiffies(1000));
+		schedule_msec_hrtimeout(1000);
 		count++;
 	}
 
