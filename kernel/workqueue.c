@@ -1438,7 +1438,7 @@ void wq_worker_running(struct task_struct *task)
 	 * CPU intensive auto-detection cares about how long a work item hogged
 	 * CPU without sleeping. Reset the starting timestamp on wakeup.
 	 */
-	worker->current_at = worker->task->se.sum_exec_runtime;
+	worker->current_at = tsk_seruntime(worker->task);
 
 	WRITE_ONCE(worker->sleeping, 0);
 }
@@ -1523,7 +1523,7 @@ void wq_worker_tick(struct task_struct *task)
 	 * We probably want to make this prettier in the future.
 	 */
 	if ((worker->flags & WORKER_NOT_RUNNING) || READ_ONCE(worker->sleeping) ||
-	    worker->task->se.sum_exec_runtime - worker->current_at <
+	    tsk_seruntime(worker->task) - worker->current_at <
 	    wq_cpu_intensive_thresh_us * NSEC_PER_USEC)
 		return;
 
@@ -3241,7 +3241,7 @@ __acquires(&pool->lock)
 	worker->current_func = work->func;
 	worker->current_pwq = pwq;
 	if (worker->task)
-		worker->current_at = worker->task->se.sum_exec_runtime;
+		worker->current_at = tsk_seruntime(worker->task);
 	worker->current_start = jiffies;
 	work_data = *work_data_bits(work);
 	worker->current_color = get_work_color(work_data);

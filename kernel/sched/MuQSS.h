@@ -599,6 +599,13 @@ struct affinity_context {
 	unsigned int		flags;
 };
 
+#define MDF_PUSH		0x01
+
+static inline bool is_migration_disabled(struct task_struct *p)
+{
+	return p->migration_disabled;
+}
+
 #define SCA_CHECK		0x01
 #define SCA_MIGRATE_DISABLE	0x02
 #define SCA_MIGRATE_ENABLE	0x04

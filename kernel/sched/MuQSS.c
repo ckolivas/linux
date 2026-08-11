@@ -271,6 +271,11 @@ static void update_irq_load_avg(struct rq *rq, long delta);
 static inline void update_irq_load_avg(struct rq *rq, long delta) {}
 #endif
 
+/* Use CONFIG_PARAVIRT as this will avoid more #ifdef in arch code. */
+#ifdef CONFIG_PARAVIRT
+struct static_key paravirt_steal_rq_enabled;
+#endif
+
 static void update_rq_clock_task(struct rq *rq, s64 delta)
 {
 /*
@@ -8032,23 +8037,54 @@ static inline int preempt_count_equals(int preempt_offset)
 	return (nested == preempt_offset);
 }
 
-void __might_sleep(const char *file, int line, int preempt_offset)
+void __might_sleep(const char *file, int line)
 {
+	unsigned int state = get_current_state();
 	/*
 	 * Blocking primitives will set (and therefore destroy) current->__state,
 	 * since we will exit with TASK_RUNNING make sure we enter with it,
 	 * otherwise we will destroy state.
 	 */
-	WARN_ONCE(current->__state != TASK_RUNNING && current->task_state_change,
+	WARN_ONCE(state != TASK_RUNNING && current->task_state_change,
 			"do not call blocking ops when !TASK_RUNNING; "
-			"state=%lx set at [<%p>] %pS\n",
-			current->__state,
+			"state=%x set at [<%p>] %pS\n", state,
 			(void *)current->task_state_change,
 			(void *)current->task_state_change);
 
-	___might_sleep(file, line, preempt_offset);
+	__might_resched(file, line, 0);
 }
 EXPORT_SYMBOL(__might_sleep);
+
+void __cant_migrate(const char *file, int line)
+{
+	static unsigned long prev_jiffy;
+
+	if (irqs_disabled())
+		return;
+
+	if (is_migration_disabled(current))
+		return;
+
+	if (!IS_ENABLED(CONFIG_PREEMPT_COUNT))
+		return;
+
+	if (preempt_count() > 0)
+		return;
+
+	if (time_before(jiffies, prev_jiffy + HZ) && prev_jiffy)
+		return;
+	prev_jiffy = jiffies;
+
+	pr_err("BUG: assuming non migratable context at %s:%d\n", file, line);
+	pr_err("in_atomic(): %d, irqs_disabled(): %d, migration_disabled() %u pid: %d, name: %s\n",
+	       in_atomic(), irqs_disabled(), is_migration_disabled(current),
+	       current->pid, current->comm);
+
+	debug_show_held_locks(current);
+	dump_stack();
+	add_taint(TAINT_WARN, LOCKDEP_STILL_OK);
+}
+EXPORT_SYMBOL_GPL(__cant_migrate);
 
 void __cant_sleep(const char *file, int line, int preempt_offset)
 {
@@ -8078,7 +8114,7 @@ void __cant_sleep(const char *file, int line, int preempt_offset)
 }
 EXPORT_SYMBOL_GPL(__cant_sleep);
 
-void ___might_sleep(const char *file, int line, int preempt_offset)
+void __might_resched(const char *file, int line, unsigned int offsets)
 {
 	/* Ratelimiting timestamp: */
 	static unsigned long prev_jiffy;
@@ -8088,7 +8124,7 @@ void ___might_sleep(const char *file, int line, int preempt_offset)
 	/* WARN_ON_ONCE() by default, no rate limit required: */
 	rcu_sleep_check();
 
-	if ((preempt_count_equals(preempt_offset) && !irqs_disabled() &&
+	if ((preempt_count_equals(offsets) && !irqs_disabled() &&
 	     !is_idle_task(current) && !current->non_block_count) ||
 	    system_state == SYSTEM_BOOTING || system_state > SYSTEM_RUNNING ||
 	    oops_in_progress)
@@ -8116,14 +8152,14 @@ void ___might_sleep(const char *file, int line, int preempt_offset)
 	if (irqs_disabled())
 		print_irqtrace_events(current);
 	if (IS_ENABLED(CONFIG_DEBUG_PREEMPT)
-	    && !preempt_count_equals(preempt_offset)) {
+	    && !preempt_count_equals(offsets)) {
 		pr_err("Preemption disabled at:");
 		print_ip_sym(KERN_ERR, preempt_disable_ip);
 	}
 	dump_stack();
 	add_taint(TAINT_WARN, LOCKDEP_STILL_OK);
 }
-EXPORT_SYMBOL(___might_sleep);
+EXPORT_SYMBOL(__might_resched);
 #endif
 
 #ifdef CONFIG_MAGIC_SYSRQ
@@ -8363,3 +8399,197 @@ void call_trace_sched_update_nr_running(struct rq *rq, int count)
 #ifdef CONFIG_RCU_TORTURE_TEST
 int sysctl_sched_rt_runtime;
 #endif
+
+/*
+ * Compatibility layer for core.c interfaces added after 5.12.
+ *
+ * These are all consumed by code outside the scheduler. Where the feature
+ * behind them does not exist under MuQSS (deadline bandwidth, sched_ext,
+ * mm_cid, the CFS runqueue debugfs) the implementation is deliberately inert
+ * rather than absent, so mainline callers need no #ifdef.
+ */
+
+/* Tracepoint helpers behind set_current_state()/set_need_resched(). */
+void __trace_set_current_state(int state_value)
+{
+	trace_sched_set_state_tp(current, state_value);
+}
+EXPORT_SYMBOL(__trace_set_current_state);
+
+void __trace_set_need_resched(struct task_struct *curr, int tif)
+{
+	trace_sched_set_need_resched_tp(curr, smp_processor_id(), tif);
+}
+EXPORT_SYMBOL_GPL(__trace_set_need_resched);
+
+unsigned long long nr_context_switches_cpu(int cpu)
+{
+	return cpu_rq(cpu)->nr_switches;
+}
+
+unsigned long get_wchan(struct task_struct *p)
+{
+	unsigned long ip = 0;
+	unsigned int state;
+
+	if (!p || p == current)
+		return 0;
+
+	/* Only get wchan if task is blocked and we can keep it that way. */
+	raw_spin_lock_irq(&p->pi_lock);
+	state = READ_ONCE(p->__state);
+	smp_rmb(); /* see try_to_wake_up() */
+	if (state != TASK_RUNNING && state != TASK_WAKING && !p->on_rq)
+		ip = __get_wchan(p);
+	raw_spin_unlock_irq(&p->pi_lock);
+
+	return ip;
+}
+
+/*
+ * Fork path. MuQSS does no cgroup bandwidth accounting and has no sched_ext
+ * to cancel, so these only need to exist.
+ */
+int sched_cgroup_fork(struct task_struct *p, struct kernel_clone_args *kargs)
+{
+	return 0;
+}
+
+void sched_cancel_fork(struct task_struct *p)
+{
+}
+
+/*
+ * rt_mutex helpers. MuQSS has no proxy execution or sched_rt_mutex bookkeeping;
+ * the pre/post hooks still have to run the worker submit/update pair so that
+ * blocking on an rt_mutex flushes plugged IO the same way schedule() does.
+ */
+void rt_mutex_pre_schedule(void)
+{
+	sched_submit_work(current);
+}
+
+void rt_mutex_schedule(void)
+{
+	schedule();
+}
+
+void rt_mutex_post_schedule(void)
+{
+	sched_update_worker(current);
+}
+
+const char *preempt_model_str(void)
+{
+	if (IS_ENABLED(CONFIG_PREEMPT_RT))
+		return "PREEMPT_RT";
+	if (preempt_model_full())
+		return "PREEMPT";
+	if (preempt_model_voluntary())
+		return "VOLUNTARY";
+	return "NONE";
+}
+
+#ifdef CONFIG_SMP
+bool cpus_equal_capacity(int this_cpu, int that_cpu)
+{
+	if (!sched_asym_cpucap_active())
+		return true;
+
+	if (this_cpu == that_cpu)
+		return true;
+
+	return arch_scale_cpu_capacity(this_cpu) == arch_scale_cpu_capacity(that_cpu);
+}
+
+/*
+ * user_cpus_ptr records an affinity mask requested by userspace so that it can
+ * be restored after a temporary restriction. MuQSS does not narrow affinities
+ * behind userspace's back, but the fork and exit paths still call these.
+ */
+int dup_user_cpus_ptr(struct task_struct *dst, struct task_struct *src,
+		      int node)
+{
+	dst->user_cpus_ptr = NULL;
+	return 0;
+}
+
+void release_user_cpus_ptr(struct task_struct *p)
+{
+	kfree(p->user_cpus_ptr);
+	p->user_cpus_ptr = NULL;
+}
+
+void set_cpus_allowed_force(struct task_struct *p, const struct cpumask *new_mask)
+{
+	struct affinity_context ac = {
+		.new_mask  = new_mask,
+		.user_mask = NULL,
+		.flags     = SCA_USER,
+	};
+
+	do_set_cpus_allowed(p, &ac);
+}
+
+void ___migrate_enable(void)
+{
+	/* MuQSS keeps the older (mask, flags) form of this helper. */
+	__set_cpus_allowed_ptr(current, &current->cpus_mask,
+			       SCA_MIGRATE_ENABLE);
+}
+EXPORT_SYMBOL_GPL(___migrate_enable);
+
+/*
+ * MuQSS picks the CPU for a task at schedule() time rather than at exec, so
+ * there is nothing useful to do here.
+ */
+void sched_exec(void)
+{
+}
+#endif /* CONFIG_SMP */
+
+/*
+ * Deadline bandwidth accounting. There is no deadline class, so no bandwidth
+ * is ever reserved and cpuset has nothing to move between root domains.
+ */
+u64 dl_cookie;
+
+int dl_bw_alloc(int cpu, u64 dl_bw)
+{
+	return 0;
+}
+
+void dl_bw_free(int cpu, u64 dl_bw)
+{
+}
+
+void sched_set_fifo_secondary(struct task_struct *p)
+{
+	struct sched_param sp = { .sched_priority = MAX_RT_PRIO / 2 - 1 };
+
+	WARN_ON_ONCE(sched_setscheduler_nocheck(p, SCHED_FIFO, &sp) != 0);
+}
+EXPORT_SYMBOL_GPL(sched_set_fifo_secondary);
+
+/*
+ * Scheduler debugfs. debug.c is CFS/EEVDF runqueue introspection and is not
+ * built under MuQSS; /proc/<pid>/sched reports nothing.
+ */
+bool sched_debug_verbose;
+
+void update_sched_domain_debugfs(void)
+{
+}
+
+void dirty_sched_domain_sysctl(int cpu)
+{
+}
+
+void proc_sched_show_task(struct task_struct *p, struct pid_namespace *ns,
+			  struct seq_file *m)
+{
+}
+
+void proc_sched_set_task(struct task_struct *p)
+{
+}
