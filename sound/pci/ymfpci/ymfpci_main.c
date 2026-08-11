@@ -742,7 +742,7 @@ static void snd_ymfpci_irq_wait(struct snd_ymfpci *chip)
 		init_waitqueue_entry(&wait, current);
 		add_wait_queue(&chip->interrupt_sleep, &wait);
 		atomic_inc(&chip->interrupt_sleep_count);
-		schedule_timeout_uninterruptible(msecs_to_jiffies(50));
+		schedule_msec_hrtimeout_uninterruptible(50);
 		remove_wait_queue(&chip->interrupt_sleep, &wait);
 	}
 }

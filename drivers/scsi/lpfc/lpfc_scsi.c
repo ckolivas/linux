@@ -5901,7 +5901,7 @@ lpfc_chk_tgt_mapped(struct lpfc_vport *vport, struct fc_rport *rport)
 			return FAILED;
 		if (pnode->nlp_state == NLP_STE_MAPPED_NODE)
 			return SUCCESS;
-		schedule_timeout_uninterruptible(msecs_to_jiffies(500));
+		schedule_msec_hrtimeout_uninterruptible(500);
 		rdata = rport->dd_data;
 		if (!rdata)
 			return FAILED;
@@ -5943,7 +5943,7 @@ lpfc_reset_flush_io_context(struct lpfc_vport *vport, uint16_t tgt_id,
 					tgt_id, lun_id, context);
 	later = secs_to_jiffies(2 * vport->cfg_devloss_tmo) + jiffies;
 	while (time_after(later, jiffies) && cnt) {
-		schedule_timeout_uninterruptible(msecs_to_jiffies(20));
+		schedule_msec_hrtimeout_uninterruptible(20);
 		cnt = lpfc_sli_sum_iocb(vport, tgt_id, lun_id, context);
 	}
 	if (cnt) {
