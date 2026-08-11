@@ -1274,6 +1274,12 @@ static inline bool smt_schedule(struct task_struct *p, struct rq *rq)
 {
 	return true;
 }
+
+/* One CPU shares its cache with itself. */
+bool cpus_share_cache(int this_cpu, int that_cpu)
+{
+	return true;
+}
 #endif /* CONFIG_SMP */
 
 static inline int normal_prio(struct task_struct *p)
@@ -1482,7 +1488,6 @@ inline int task_curr(const struct task_struct *p)
 	return cpu_curr(task_cpu(p)) == p;
 }
 
-#ifdef CONFIG_SMP
 /*
  * wait_task_inactive - wait for a thread to unschedule.
  *
@@ -1598,6 +1603,7 @@ unsigned long wait_task_inactive(struct task_struct *p, unsigned int match_state
  * to another CPU then no harm is done and the purpose has been
  * achieved as well.
  */
+#ifdef CONFIG_SMP
 void kick_process(struct task_struct *p)
 {
 	int cpu;
@@ -1608,8 +1614,13 @@ void kick_process(struct task_struct *p)
 		smp_sched_reschedule(cpu);
 	preempt_enable();
 }
+#else /* !CONFIG_SMP */
+/* @p can only be running on the CPU we are already running on. */
+void kick_process(struct task_struct *p)
+{
+}
+#endif /* CONFIG_SMP */
 EXPORT_SYMBOL_GPL(kick_process);
-#endif
 
 /*
  * RT tasks preempt purely on priority. SCHED_NORMAL tasks preempt on the
@@ -8242,10 +8253,51 @@ void __init sched_init_smp(void)
 
 	sched_smp_initialized = true;
 }
-#else
+#else /* !CONFIG_SMP */
 void __init sched_init_smp(void)
 {
 	sched_smp_initialized = true;
+}
+
+/*
+ * 7.1 dropped the !CONFIG_SMP inline stubs these used to have in
+ * <linux/sched.h>, so the scheduler has to provide them on UP too. There is
+ * only ever cpu 0 to run on, so affinity is either trivially satisfied or
+ * impossible.
+ */
+int set_cpus_allowed_ptr(struct task_struct *p, const struct cpumask *new_mask)
+{
+	if (!cpumask_test_cpu(0, new_mask))
+		return -EINVAL;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(set_cpus_allowed_ptr);
+
+void set_cpus_allowed_force(struct task_struct *p, const struct cpumask *new_mask)
+{
+	cpumask_copy(&p->cpus_mask, new_mask);
+	p->nr_cpus_allowed = cpumask_weight(new_mask);
+}
+
+#ifdef CONFIG_NO_HZ_COMMON
+void nohz_balance_enter_idle(int cpu) {}
+
+/*
+ * The only CPU is the one already running this, so it is by definition not
+ * idle and needs no kick.
+ */
+void wake_up_nohz_cpu(int cpu)
+{
+}
+#endif /* CONFIG_NO_HZ_COMMON */
+
+/*
+ * topology.c is not built on UP, but <linux/sched/topology.h> declares this
+ * unconditionally and amd-pstate calls it. There are no sched domains to
+ * update.
+ */
+void sched_update_asym_prefer_cpu(int cpu, int old_prio, int new_prio)
+{
 }
 #endif /* CONFIG_SMP */
 
@@ -9190,24 +9242,6 @@ bool cpus_equal_capacity(int this_cpu, int that_cpu)
 	return arch_scale_cpu_capacity(this_cpu) == arch_scale_cpu_capacity(that_cpu);
 }
 
-/*
- * user_cpus_ptr records an affinity mask requested by userspace so that it can
- * be restored after a temporary restriction. MuQSS does not narrow affinities
- * behind userspace's back, but the fork and exit paths still call these.
- */
-int dup_user_cpus_ptr(struct task_struct *dst, struct task_struct *src,
-		      int node)
-{
-	dst->user_cpus_ptr = NULL;
-	return 0;
-}
-
-void release_user_cpus_ptr(struct task_struct *p)
-{
-	kfree(p->user_cpus_ptr);
-	p->user_cpus_ptr = NULL;
-}
-
 void set_cpus_allowed_force(struct task_struct *p, const struct cpumask *new_mask)
 {
 	struct affinity_context ac = {
@@ -9225,7 +9259,34 @@ void ___migrate_enable(void)
 	__set_cpus_allowed_ptr(current, &current->cpus_mask,
 			       SCA_MIGRATE_ENABLE);
 }
+#else /* !CONFIG_SMP */
+/*
+ * Nothing ever repoints cpus_ptr away from cpus_mask on UP, so
+ * __migrate_enable() never reaches here - it just has to link.
+ */
+void ___migrate_enable(void)
+{
+}
+#endif /* CONFIG_SMP */
 EXPORT_SYMBOL_GPL(___migrate_enable);
+
+/*
+ * user_cpus_ptr records an affinity mask requested by userspace so that it can
+ * be restored after a temporary restriction. MuQSS does not narrow affinities
+ * behind userspace's back, but the fork and exit paths still call these.
+ */
+int dup_user_cpus_ptr(struct task_struct *dst, struct task_struct *src,
+		      int node)
+{
+	dst->user_cpus_ptr = NULL;
+	return 0;
+}
+
+void release_user_cpus_ptr(struct task_struct *p)
+{
+	kfree(p->user_cpus_ptr);
+	p->user_cpus_ptr = NULL;
+}
 
 /*
  * Modules cannot see the runqueues layout, so export out-of-line wrappers
@@ -9250,7 +9311,6 @@ EXPORT_SYMBOL_GPL(migrate_enable);
 void sched_exec(void)
 {
 }
-#endif /* CONFIG_SMP */
 
 /*
  * Deadline bandwidth accounting. There is no deadline class, so no bandwidth
