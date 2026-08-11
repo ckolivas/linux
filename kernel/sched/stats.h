@@ -96,6 +96,8 @@ struct sched_entity_stats {
 } __no_randomize_layout;
 #endif
 
+#ifndef CONFIG_SCHED_MUQSS
+/* Only reachable from fair.c, debug.c and core.c, none of which MuQSS builds. */
 static inline struct sched_statistics *
 __schedstats_from_se(struct sched_entity *se)
 {
@@ -105,6 +107,7 @@ __schedstats_from_se(struct sched_entity *se)
 #endif
 	return &task_of(se)->stats;
 }
+#endif /* CONFIG_SCHED_MUQSS */
 
 #ifdef CONFIG_PSI
 void psi_task_change(struct task_struct *task, int clear, int set);

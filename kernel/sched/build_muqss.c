@@ -49,6 +49,7 @@
 #include <linux/kobject_api.h>
 #include <linux/livepatch.h>
 #include <linux/membarrier.h>
+#include <linux/memblock.h>
 #include <linux/mempolicy.h>
 #include <linux/nmi.h>
 #include <linux/nospec.h>
@@ -78,6 +79,8 @@
 #include <uapi/linux/sched/types.h>
 
 #include <asm/switch_to.h>
+
+#include <trace/events/power.h>
 
 #include "sched.h"
 #include "stats.h"
