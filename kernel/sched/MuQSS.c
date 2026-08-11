@@ -1178,12 +1178,10 @@ static int best_mask_cpu(int best_cpu, struct rq *rq, cpumask_t *tmpmask)
 #ifdef CONFIG_SCHED_SMT
 		if (locality == LOCALITY_SMT)
 			ranking |= CPUIDLE_DIFF_THREAD;
+		if (!(tmp_rq->siblings_idle(tmp_rq)))
+			ranking |= CPUIDLE_THREAD_BUSY;
 #endif
-		if (ranking < best_ranking
-#ifdef CONFIG_SCHED_SMT
-			|| (ranking == best_ranking && (tmp_rq->siblings_idle(tmp_rq)))
-#endif
-		) {
+		if (ranking < best_ranking) {
 			best_cpu = cpu_tmp;
 			best_ranking = ranking;
 		}
