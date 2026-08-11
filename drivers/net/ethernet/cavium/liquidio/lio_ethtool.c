@@ -1090,7 +1090,7 @@ static int lio_reset_queues(struct net_device *netdev, uint32_t num_qs)
 	struct napi_struct *napi, *n;
 	int ret;
 
-	schedule_timeout_uninterruptible(msecs_to_jiffies(100));
+	schedule_msec_hrtimeout_uninterruptible(100);
 
 	if (wait_for_pending_requests(oct))
 		dev_err(&oct->pci_dev->dev, "There were pending requests\n");

@@ -611,7 +611,7 @@ static int be_mbox_db_ready_poll(struct be_ctrl_info *ctrl)
 		if (time_after(jiffies, timeout))
 			break;
 		/* 1ms sleep is enough in most cases */
-		schedule_timeout_uninterruptible(msecs_to_jiffies(1));
+		schedule_msec_hrtimeout_uninterruptible(1);
 	} while (!ready);
 
 	beiscsi_log(phba, KERN_ERR,

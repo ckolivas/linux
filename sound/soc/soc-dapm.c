@@ -166,7 +166,7 @@ static void dapm_assert_locked(struct snd_soc_dapm_context *dapm)
 static void dapm_pop_wait(void)
 {
 	if (pop_time)
-		schedule_timeout_uninterruptible(msecs_to_jiffies(pop_time));
+		schedule_msec_hrtimeout_uninterruptible(pop_time);
 }
 
 __printf(2, 3)
