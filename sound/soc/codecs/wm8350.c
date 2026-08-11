@@ -234,11 +234,9 @@ static void wm8350_pga_work(struct work_struct *work)
 		    out2->ramp == WM8350_RAMP_UP) {
 			/* delay is longer over 0dB as increases are larger */
 			if (i >= WM8350_OUTn_0dB)
-				schedule_timeout_interruptible(msecs_to_jiffies
-							       (2));
+				schedule_msec_hrtimeout_interruptible(2);
 			else
-				schedule_timeout_interruptible(msecs_to_jiffies
-							       (1));
+				schedule_msec_hrtimeout_interruptible(1);
 		} else
 			udelay(50);	/* doesn't matter if we delay longer */
 	}
@@ -1122,9 +1120,7 @@ static int wm8350_set_bias_level(struct snd_soc_component *component,
 					 (platform->dis_out4 << 6));
 
 			/* wait for discharge */
-			schedule_timeout_interruptible(msecs_to_jiffies
-						       (platform->
-							cap_discharge_msecs));
+			schedule_msec_hrtimeout_interruptible(platform->cap_discharge_msecs);
 
 			/* enable antipop */
 			wm8350_reg_write(wm8350, WM8350_ANTI_POP_CONTROL,
@@ -1138,9 +1134,7 @@ static int wm8350_set_bias_level(struct snd_soc_component *component,
 					 WM8350_VBUFEN);
 
 			/* wait for vmid */
-			schedule_timeout_interruptible(msecs_to_jiffies
-						       (platform->
-							vmid_charge_msecs));
+			schedule_msec_hrtimeout_interruptible(platform->vmid_charge_msecs);
 
 			/* turn on vmid 300k  */
 			pm1 = wm8350_reg_read(wm8350, WM8350_POWER_MGMT_1) &
@@ -1189,9 +1183,7 @@ static int wm8350_set_bias_level(struct snd_soc_component *component,
 		wm8350_reg_write(wm8350, WM8350_POWER_MGMT_1, pm1);
 
 		/* wait */
-		schedule_timeout_interruptible(msecs_to_jiffies
-					       (platform->
-						vmid_discharge_msecs));
+		schedule_msec_hrtimeout_interruptible(platform->vmid_discharge_msecs);
 
 		wm8350_reg_write(wm8350, WM8350_ANTI_POP_CONTROL,
 				 (platform->vmid_s_curve << 8) |
@@ -1207,8 +1199,7 @@ static int wm8350_set_bias_level(struct snd_soc_component *component,
 				 pm1 | WM8350_OUTPUT_DRAIN_EN);
 
 		/* wait */
-		schedule_timeout_interruptible(msecs_to_jiffies
-					       (platform->drain_msecs));
+		schedule_msec_hrtimeout_interruptible(platform->drain_msecs);
 
 		pm1 &= ~WM8350_BIASEN;
 		wm8350_reg_write(wm8350, WM8350_POWER_MGMT_1, pm1);

@@ -965,7 +965,7 @@ static bool esas2r_flash_access(struct esas2r_adapter *a, u32 function)
 				break;
 		}
 
-		schedule_timeout_interruptible(msecs_to_jiffies(100));
+		schedule_msec_hrtimeout_interruptible(100);
 
 		if ((jiffies_to_msecs(jiffies) - starttime) > timeout) {
 			/*

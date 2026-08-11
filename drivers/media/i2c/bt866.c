@@ -65,7 +65,7 @@ static int bt866_write(struct bt866 *encoder, u8 subaddr, u8 data)
 		err++;
 		v4l_warn(client, "error #%d writing to 0x%02x\n",
 				err, subaddr);
-		schedule_timeout_interruptible(msecs_to_jiffies(100));
+		schedule_msec_hrtimeout_interruptible(100);
 	}
 	if (err == 3) {
 		v4l_warn(client, "giving up\n");

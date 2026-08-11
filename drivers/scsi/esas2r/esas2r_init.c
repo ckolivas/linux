@@ -994,7 +994,7 @@ bool esas2r_check_adapter(struct esas2r_adapter *a)
 			break;
 		}
 
-		schedule_timeout_interruptible(msecs_to_jiffies(100));
+		schedule_msec_hrtimeout_interruptible(100);
 
 		if ((jiffies_to_msecs(jiffies) - starttime) > 180000) {
 			esas2r_hdebug("FW ready TMO");
@@ -1017,7 +1017,7 @@ bool esas2r_check_adapter(struct esas2r_adapter *a)
 			break;
 		}
 
-		schedule_timeout_interruptible(msecs_to_jiffies(50));
+		schedule_msec_hrtimeout_interruptible(50);
 
 		if ((jiffies_to_msecs(jiffies) - starttime) > 3000) {
 			esas2r_hdebug("timeout waiting for interface down");
@@ -1106,7 +1106,7 @@ skip_chip_reset:
 			break;
 		}
 
-		schedule_timeout_interruptible(msecs_to_jiffies(100));
+		schedule_msec_hrtimeout_interruptible(100);
 
 		if ((jiffies_to_msecs(jiffies) - starttime) > 3000) {
 			esas2r_hdebug(
@@ -1356,7 +1356,7 @@ bool esas2r_init_adapter_hw(struct esas2r_adapter *a, bool init_poll)
 			atomic_dec(&a->disable_cnt);
 
 		while (test_bit(AF_DISC_PENDING, &a->flags)) {
-			schedule_timeout_interruptible(msecs_to_jiffies(100));
+			schedule_msec_hrtimeout_interruptible(100);
 
 			/*
 			 * Determine the need for a timer tick based on the
@@ -1512,7 +1512,7 @@ static void esas2r_power_down_notify_firmware(struct esas2r_adapter *a)
 			break;
 		}
 
-		schedule_timeout_interruptible(msecs_to_jiffies(100));
+		schedule_msec_hrtimeout_interruptible(100);
 
 		if ((jiffies_to_msecs(jiffies) - starttime) > 30000) {
 			esas2r_hdebug("Timeout waiting for power down");
@@ -1557,7 +1557,7 @@ void esas2r_power_down(struct esas2r_adapter *a)
 				break;
 			}
 
-			schedule_timeout_interruptible(msecs_to_jiffies(100));
+			schedule_msec_hrtimeout_interruptible(100);
 
 			if ((jiffies_to_msecs(jiffies) - starttime) > 3000) {
 				esas2r_hdebug(

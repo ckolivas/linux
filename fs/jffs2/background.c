@@ -110,7 +110,7 @@ static int jffs2_garbage_collect_thread(void *_c)
 		 * This forces the GCD to slow the hell down.   Pulling an
 		 * inode in with read_inode() is much preferable to having
 		 * the GC thread get there first. */
-		schedule_timeout_interruptible(msecs_to_jiffies(50));
+		schedule_msec_hrtimeout_interruptible(50);
 
 		if (kthread_should_stop()) {
 			jffs2_dbg(1, "%s(): kthread_stop() called\n", __func__);

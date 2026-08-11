@@ -1057,7 +1057,7 @@ static int wm8900_set_bias_level(struct snd_soc_component *component,
 				     WM8900_REG_POWER1_STARTUP_BIAS_ENA | 0x1);
 
 			/* Allow capacitors to charge */
-			schedule_timeout_interruptible(msecs_to_jiffies(400));
+			schedule_msec_hrtimeout_interruptible(400);
 
 			/* Enable bias */
 			snd_soc_component_write(component, WM8900_REG_POWER1,
@@ -1091,7 +1091,7 @@ static int wm8900_set_bias_level(struct snd_soc_component *component,
 		/* Discharge caps */
 		snd_soc_component_write(component, WM8900_REG_POWER1,
 			     WM8900_REG_POWER1_STARTUP_BIAS_ENA);
-		schedule_timeout_interruptible(msecs_to_jiffies(500));
+		schedule_msec_hrtimeout_interruptible(500);
 
 		/* Remove clamp */
 		snd_soc_component_write(component, WM8900_REG_HPCTL1, 0);
@@ -1105,7 +1105,7 @@ static int wm8900_set_bias_level(struct snd_soc_component *component,
 		/* Need to let things settle before stopping the clock
 		 * to ensure that restart works, see "Stopping the
 		 * master clock" in the datasheet. */
-		schedule_timeout_interruptible(msecs_to_jiffies(1));
+		schedule_msec_hrtimeout_interruptible(1);
 		snd_soc_component_write(component, WM8900_REG_POWER2,
 			     WM8900_REG_POWER2_SYSCLK_ENA);
 		break;

@@ -484,7 +484,7 @@ static int snd_msnd_calibrate_adc(struct snd_msnd *chip, u16 srate)
 		       & ~0x0001, chip->SMA + SMA_wCurrHostStatusFlags);
 	if (snd_msnd_send_word(chip, 0, 0, HDEXAR_CAL_A_TO_D) == 0 &&
 	    snd_msnd_send_dsp_cmd_chk(chip, HDEX_AUX_REQ) == 0) {
-		schedule_timeout_interruptible(msecs_to_jiffies(333));
+		schedule_msec_hrtimeout_interruptible(333);
 		return 0;
 	}
 	dev_warn(chip->card->dev, LOGNAME ": ADC calibration failed\n");
