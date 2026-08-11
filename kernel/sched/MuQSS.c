@@ -120,10 +120,13 @@ EXPORT_TRACEPOINT_SYMBOL(sched_set_state_tp);
  */
 #define APPROX_NS_PS		(1073741824) /* Approximate ns per second */
 #define JIFFY_NS		(APPROX_NS_PS / HZ)
-#define JIFFY_US		(1048576 / HZ)
 #define NS_TO_JIFFIES(TIME)	((TIME) / JIFFY_NS)
 #define HALF_JIFFY_NS		(APPROX_NS_PS / HZ / 2)
-#define HALF_JIFFY_US		(1048576 / HZ / 2)
+/*
+ * time_slice is banked in NS_TO_US() of real nanoseconds, so half a tick in
+ * those units has to come from TICK_NSEC, not from the approximate scale.
+ */
+#define HALF_JIFFY_US		(NS_TO_US(TICK_NSEC) / 2)
 #define MS_TO_NS(TIME)		((TIME) << 20)
 #define MS_TO_US(TIME)		((TIME) << 10)
 #define NS_TO_MS(TIME)		((TIME) >> 20)
