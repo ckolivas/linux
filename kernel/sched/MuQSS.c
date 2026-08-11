@@ -1122,13 +1122,14 @@ static void resched_curr(struct rq *rq)
 		trace_sched_wake_idle_without_ipi(cpu);
 }
 
-#define CPUIDLE_DIFF_THREAD     (1)
-#define CPUIDLE_DIFF_CORE_LLC   (2)
-#define CPUIDLE_DIFF_CORE       (4)
-#define CPUIDLE_CACHE_BUSY      (8)
-#define CPUIDLE_DIFF_CPU        (16)
-#define CPUIDLE_THREAD_BUSY     (32)
-#define CPUIDLE_DIFF_NODE       (64)
+#define CPUIDLE_NO_SIBLING      (1)
+#define CPUIDLE_DIFF_THREAD     (2)
+#define CPUIDLE_DIFF_CORE_LLC   (4)
+#define CPUIDLE_DIFF_CORE       (8)
+#define CPUIDLE_CACHE_BUSY      (16)
+#define CPUIDLE_DIFF_CPU        (32)
+#define CPUIDLE_THREAD_BUSY     (64)
+#define CPUIDLE_DIFF_NODE       (128)
 
 /*
  * The best idle CPU is chosen according to the CPUIDLE ranking above where the
@@ -1144,12 +1145,20 @@ static void resched_curr(struct rq *rq)
  * Other node, other CPU, idle cache, idle threads.
  * Other node, other CPU, busy cache, idle threads.
  * Other node, other CPU, busy threads.
+ *
+ * CPUIDLE_NO_SIBLING is the least significant rank so it only separates cores
+ * that are otherwise equal, preferring a core with an idle SMT sibling over one
+ * with no siblings at all. On hybrid CPUs that indirectly prefers P cores over
+ * E cores, since only the former have siblings. A core whose sibling is busy
+ * still ranks below a core with no siblings as it only offers half a core.
+ * This does not treat CPUs with a single offline sibling as idle for
+ * simplicity.
  */
 static int best_mask_cpu(int best_cpu, struct rq *rq, cpumask_t *tmpmask)
 {
 	int best_ranking = CPUIDLE_DIFF_NODE | CPUIDLE_THREAD_BUSY |
 		CPUIDLE_DIFF_CPU | CPUIDLE_CACHE_BUSY | CPUIDLE_DIFF_CORE |
-		CPUIDLE_DIFF_CORE_LLC | CPUIDLE_DIFF_THREAD;
+		CPUIDLE_DIFF_CORE_LLC | CPUIDLE_DIFF_THREAD | CPUIDLE_NO_SIBLING;
 	int cpu_tmp;
 
 	if (cpumask_test_cpu(best_cpu, tmpmask))
@@ -1181,7 +1190,9 @@ static int best_mask_cpu(int best_cpu, struct rq *rq, cpumask_t *tmpmask)
 #ifdef CONFIG_SCHED_SMT
 		if (locality == LOCALITY_SMT)
 			ranking |= CPUIDLE_DIFF_THREAD;
-		if (!(tmp_rq->siblings_idle(tmp_rq)))
+		if (!tmp_rq->has_smt_sibling)
+			ranking |= CPUIDLE_NO_SIBLING;
+		else if (!(tmp_rq->siblings_idle(tmp_rq)))
 			ranking |= CPUIDLE_THREAD_BUSY;
 #endif
 		if (ranking < best_ranking) {
@@ -7943,6 +7954,7 @@ static void __init select_leaders(void)
 					rq->cpu_locality[other_cpu] = LOCALITY_SMT;
 			}
 			rq->siblings_idle = siblings_cpu_idle;
+			rq->has_smt_sibling = true;
 			smt_threads = true;
 		}
 #endif

@@ -291,6 +291,7 @@ struct rq {
 #ifdef CONFIG_SCHED_SMT
 	struct rq *smt_leader; /* First logical CPU in SMT siblings */
 	cpumask_t thread_mask;
+	bool has_smt_sibling; /* This CPU has SMT siblings at all */
 	bool (*siblings_idle)(struct rq *rq);
 	/* See if all smt siblings are idle */
 #endif /* CONFIG_SCHED_SMT */
