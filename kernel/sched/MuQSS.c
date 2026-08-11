@@ -1393,6 +1393,33 @@ void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 #endif /* CONFIG_SMP */
 
 /*
+ * PSI keeps per-CPU runnable counters. take_task() skips the usual
+ * dequeue/enqueue pair (SAVE/RESTORE), so when the physical CPU changes we
+ * must migrate TSK_RUNNING (and friends) ourselves or the next sleep clears
+ * them on the wrong CPU → underflow. Leave TSK_ONCPU to psi_sched_switch().
+ */
+#ifdef CONFIG_PSI
+static inline void psi_set_task_cpu(struct task_struct *p, int cpu)
+{
+	unsigned int migrate = p->psi_flags & ~TSK_ONCPU;
+
+	if (!migrate) {
+		set_task_cpu(p, cpu);
+		return;
+	}
+
+	psi_task_change(p, migrate, 0);
+	set_task_cpu(p, cpu);
+	psi_task_change(p, 0, migrate);
+}
+#else /* !CONFIG_PSI */
+static inline void psi_set_task_cpu(struct task_struct *p, int cpu)
+{
+	set_task_cpu(p, cpu);
+}
+#endif /* CONFIG_PSI */
+
+/*
  * Move a task off the runqueue and take it to a cpu for it will
  * become the running task.
  */
@@ -1406,22 +1433,10 @@ static inline void take_task(struct rq *rq, int cpu, struct task_struct *p)
 		sched_info_dequeue(p_rq, p);
 		sched_info_enqueue(rq, p);
 	}
-	/*
-	 * PSI keeps per-CPU runnable counters. take_task() skips the usual
-	 * dequeue/enqueue pair (SAVE/RESTORE), so when the physical CPU
-	 * changes we must migrate TSK_RUNNING (and friends) ourselves or
-	 * the next sleep clears them on the wrong CPU → underflow.
-	 * Leave TSK_ONCPU to psi_sched_switch().
-	 */
-	if (old_cpu != cpu && p->psi_flags & ~TSK_ONCPU) {
-		unsigned int migrate = p->psi_flags & ~TSK_ONCPU;
-
-		psi_task_change(p, migrate, 0);
+	if (old_cpu != cpu)
+		psi_set_task_cpu(p, cpu);
+	else
 		set_task_cpu(p, cpu);
-		psi_task_change(p, 0, migrate);
-	} else {
-		set_task_cpu(p, cpu);
-	}
 }
 
 /*
@@ -7288,10 +7303,9 @@ static void unbind_zero(int src_cpu)
 }
 
 /*
- * Ensure that the idle task is using init_mm right before its cpu goes
- * offline.
+ * idle_task_exit() is an empty inline in <linux/sched/hotplug.h> now; the
+ * outgoing CPU switches back to init_mm from sched_cpu_wait_empty() instead.
  */
-/* idle_task_exit() is an empty inline in <linux/sched/hotplug.h> now. */
 #else /* CONFIG_HOTPLUG_CPU */
 static void unbind_zero(int src_cpu) {}
 #endif /* CONFIG_HOTPLUG_CPU */
@@ -7662,8 +7676,41 @@ int sched_cpu_starting(unsigned int cpu)
 }
 
 #ifdef CONFIG_HOTPLUG_CPU
+/*
+ * Invoked on the outgoing CPU in context of the CPU hotplug thread after
+ * ensuring that there are no user space tasks left on the CPU.
+ *
+ * If there is a lazy mm in use on the hotplug thread, drop it and switch to
+ * init_mm.  finish_cpu() on the control CPU drops the init_mm reference and
+ * WARNs if we left anything else behind.  5.12 did this from idle_task_exit();
+ * mainline now does it here from sched_cpu_wait_empty().
+ */
+static void __sched_force_init_mm(void)
+{
+	struct mm_struct *mm = current->active_mm;
+
+	if (mm == &init_mm)
+		return;
+
+	mmgrab_lazy_tlb(&init_mm);
+	current->active_mm = &init_mm;
+	switch_mm_irqs_off(mm, &init_mm, current);
+	finish_arch_post_lock_switch();
+	mmdrop_lazy_tlb(mm);
+}
+
+static void sched_force_init_mm(void)
+{
+	unsigned long flags;
+
+	local_irq_save(flags);
+	__sched_force_init_mm();
+	local_irq_restore(flags);
+}
+
 int sched_cpu_wait_empty(unsigned int __always_unused cpu)
 {
+	sched_force_init_mm();
 	return 0;
 }
 
@@ -7685,6 +7732,15 @@ int sched_cpu_dying(unsigned int cpu)
 	double_rq_unlock(rq, cpu_rq(0));
 	sched_start_tick(rq, cpu);
 	hrexpiry_clear(rq);
+	/*
+	 * Unlike mainline, MuQSS does not push tasks off a deactivated CPU
+	 * until bind_zero() above, so a user task may have run here after
+	 * sched_cpu_wait_empty() already switched the hotplug thread to
+	 * init_mm.  Drop the lazy mm again now that this is the last thing to
+	 * run before idle takes over, or the idle task carries a user mm into
+	 * finish_cpu(), which warns and drops a reference that is not ours.
+	 */
+	__sched_force_init_mm();
 	local_irq_restore(flags);
 
 	return 0;
@@ -7875,12 +7931,24 @@ static void __init share_and_free_rq(struct rq *leader, struct rq *rq)
 	skiplist_node *old_node = rq->node;
 	skiplist *old_sl = rq->sl;
 
-	/* Move every queued task onto the leader skiplist. */
+	/*
+	 * Move every queued task onto the leader skiplist.  nr_running is
+	 * accounted against the rq the task belongs to (task_rq(p), which is
+	 * unchanged here) rather than the rq owning the skiplist, so hand the
+	 * counts straight back or the follower underflows on the next dequeue
+	 * and the leader keeps a phantom entry forever.
+	 */
 	while (rq->sl->entries > 0) {
 		struct task_struct *p = rq->node->next[0]->value;
 
 		dequeue_task(rq, p, DEQUEUE_SAVE);
 		enqueue_task(leader, p, ENQUEUE_RESTORE);
+		leader->nr_running--;
+		rq->nr_running++;
+		if (rt_task(p)) {
+			leader->rt_nr_running--;
+			rq->rt_nr_running++;
+		}
 	}
 
 	/*
@@ -8105,8 +8173,13 @@ void __init sched_init_smp(void)
 	if (set_cpus_allowed_ptr(current, housekeeping_cpumask(HK_TYPE_DOMAIN)) < 0)
 		BUG();
 
-	local_irq_disable();
+	/*
+	 * Take the sleeping lock before disabling interrupts - the 5.12 order
+	 * trips "sleeping function called from invalid context" under
+	 * CONFIG_DEBUG_ATOMIC_SLEEP.
+	 */
 	mutex_lock(&sched_domains_mutex);
+	local_irq_disable();
 	lock_all_rqs();
 
 	printk(KERN_INFO "MuQSS possible/present/online CPUs: %d/%d/%d\n",
@@ -8121,9 +8194,9 @@ void __init sched_init_smp(void)
 	share_rqs();
 
 	unlock_leader_rqs();
-	mutex_unlock(&sched_domains_mutex);
-
 	local_irq_enable();
+
+	mutex_unlock(&sched_domains_mutex);
 
 	setup_rq_orders();
 
@@ -9196,6 +9269,8 @@ EXPORT_SYMBOL_GPL(sched_set_fifo_secondary);
  */
 bool sched_debug_verbose;
 
+#ifdef CONFIG_SMP
+/* Only topology.c calls these, and it is not built on UP. */
 void update_sched_domain_debugfs(void)
 {
 }
@@ -9203,6 +9278,7 @@ void update_sched_domain_debugfs(void)
 void dirty_sched_domain_sysctl(int cpu)
 {
 }
+#endif /* CONFIG_SMP */
 
 void proc_sched_show_task(struct task_struct *p, struct pid_namespace *ns,
 			  struct seq_file *m)

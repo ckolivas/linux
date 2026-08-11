@@ -817,6 +817,13 @@ static inline void trigger_load_balance(struct rq *rq)
 
 static inline void flush_smp_call_function_from_idle(void) { }
 
+/*
+ * UP has no sched domains and MuQSS's rq has no ->sd, but stats.c walks the
+ * domain list unconditionally. Hand it an empty list.
+ */
+#define for_each_domain(cpu, __sd) \
+	for (__sd = NULL; __sd; __sd = __sd->parent)
+
 #endif /* CONFIG_SMP */
 
 #ifdef CONFIG_CPU_IDLE

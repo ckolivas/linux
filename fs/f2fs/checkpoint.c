@@ -28,15 +28,7 @@ static inline void get_lock_elapsed_time(struct f2fs_time_stat *ts)
 {
 	ts->total_time = ktime_get();
 #ifdef CONFIG_64BIT
-	/*
-	 * Snapshot of cumulative CPU time for lock-wait tracing. Keep this a
-	 * plain field read (no rq lock) to match the original CFS path.
-	 */
-# ifdef CONFIG_SCHED_MUQSS
-	ts->running_time = current->sched_time;
-# else
-	ts->running_time = current->se.sum_exec_runtime;
-# endif
+	ts->running_time = tsk_seruntime(current);
 #endif
 #if defined(CONFIG_SCHED_INFO) && defined(CONFIG_SCHEDSTATS)
 	ts->runnable_time = current->sched_info.run_delay;
