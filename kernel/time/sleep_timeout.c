@@ -4,6 +4,7 @@
  */
 
 #include <linux/delay.h>
+#include <linux/freezer.h>
 #include <linux/jiffies.h>
 #include <linux/timer.h>
 #include <linux/sched/signal.h>
@@ -299,9 +300,10 @@ long __sched schedule_msec_hrtimeout(long timeout)
 	/*
 	 * If regular timer resolution is adequate or hrtimer resolution is not
 	 * (yet) better than Hz, as would occur during startup, use regular
-	 * timers.
+	 * timers. Freezing gets the same treatment as some drivers still do not
+	 * correctly use freezable timeouts.
 	 */
-	if (jiffs > 4 || hrtimer_resolution >= NSEC_PER_SEC / HZ)
+	if (jiffs > 4 || hrtimer_resolution >= NSEC_PER_SEC / HZ || pm_freezing)
 		return schedule_timeout(jiffs);
 
 	secs = timeout / 1000;
@@ -430,7 +432,7 @@ void msleep(unsigned int msecs)
 	 * Use high resolution timers where the resolution of tick based
 	 * timers is inadequate.
 	 */
-	if (jiffs < 5 && hrtimer_resolution < NSEC_PER_SEC / HZ) {
+	if (jiffs < 5 && hrtimer_resolution < NSEC_PER_SEC / HZ && !pm_freezing) {
 		while (msecs)
 			msecs = schedule_msec_hrtimeout_uninterruptible(msecs);
 		return;
@@ -459,7 +461,7 @@ unsigned long msleep_interruptible(unsigned int msecs)
 	int jiffs = msecs_to_jiffies(msecs);
 	unsigned long timeout;
 
-	if (jiffs < 5 && hrtimer_resolution < NSEC_PER_SEC / HZ) {
+	if (jiffs < 5 && hrtimer_resolution < NSEC_PER_SEC / HZ && !pm_freezing) {
 		while (msecs && !signal_pending(current))
 			msecs = schedule_msec_hrtimeout_interruptible(msecs);
 		return msecs;
