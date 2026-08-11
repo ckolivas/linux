@@ -856,8 +856,7 @@ static int cs_hsi_data_sync(struct cs_hsi_iface *hi)
 		 */
 		prepare_to_wait(&hi->datawait, &wait, TASK_INTERRUPTIBLE);
 		spin_unlock_bh(&hi->lock);
-		s = schedule_timeout(
-			msecs_to_jiffies(CS_HSI_TRANSFER_TIMEOUT_MS));
+		s = schedule_msec_hrtimeout(CS_HSI_TRANSFER_TIMEOUT_MS);
 		spin_lock_bh(&hi->lock);
 		finish_wait(&hi->datawait, &wait);
 		if (!s) {

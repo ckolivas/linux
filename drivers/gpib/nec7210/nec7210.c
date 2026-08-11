@@ -317,7 +317,7 @@ int nec7210_go_to_standby(struct gpib_board *board, struct nec7210_priv *priv)
 	if (i == timeout) {
 		for (i = 0; i < HZ; i++) {
 			set_current_state(TASK_INTERRUPTIBLE);
-			if (schedule_timeout(1))
+			if (schedule_min_hrtimeout())
 				return -ERESTARTSYS;
 			adsr_bits = read_byte(priv, ADSR);
 			if (adsr_bits & HR_NATN)

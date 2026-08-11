@@ -987,7 +987,7 @@ static void khugepaged_alloc_sleep(void)
 
 	add_wait_queue(&khugepaged_wait, &wait);
 	__set_current_state(TASK_INTERRUPTIBLE|TASK_FREEZABLE);
-	schedule_timeout(msecs_to_jiffies(khugepaged_alloc_sleep_millisecs));
+	schedule_msec_hrtimeout(khugepaged_alloc_sleep_millisecs);
 	remove_wait_queue(&khugepaged_wait, &wait);
 }
 

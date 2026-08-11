@@ -923,7 +923,7 @@ static int usblp_wwait(struct usblp *usblp, int nonblock)
 		if (rc <= 0)
 			break;
 
-		if (schedule_timeout(msecs_to_jiffies(1500)) == 0) {
+		if (schedule_msec_hrtimeout(1500) == 0) {
 			if (usblp->flags & LP_ABORT) {
 				err = usblp_check_status(usblp, err);
 				if (err == 1) {	/* Paper out */

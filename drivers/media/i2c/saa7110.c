@@ -184,7 +184,7 @@ static v4l2_std_id determine_norm(struct v4l2_subdev *sd)
 	saa7110_write_block(sd, initseq, sizeof(initseq));
 	saa7110_selmux(sd, decoder->input);
 	prepare_to_wait(&decoder->wq, &wait, TASK_UNINTERRUPTIBLE);
-	schedule_timeout(msecs_to_jiffies(250));
+	schedule_msec_hrtimeout(250);
 	finish_wait(&decoder->wq, &wait);
 	status = saa7110_read(sd);
 	if (status & 0x40) {
@@ -219,7 +219,7 @@ static v4l2_std_id determine_norm(struct v4l2_subdev *sd)
 	/*saa7110_write(sd,0x2E,0x9A);*/
 
 	prepare_to_wait(&decoder->wq, &wait, TASK_UNINTERRUPTIBLE);
-	schedule_timeout(msecs_to_jiffies(250));
+	schedule_msec_hrtimeout(250);
 	finish_wait(&decoder->wq, &wait);
 
 	status = saa7110_read(sd);
