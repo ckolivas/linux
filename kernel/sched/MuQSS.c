@@ -114,10 +114,11 @@ EXPORT_TRACEPOINT_SYMBOL(sched_set_state_tp);
 
 /*
  * Some helpers for converting to/from various scales. Use shifts to get
- * approximate multiples of ten for less overhead.
+ * approximate multiples of ten for less overhead. These are internal scales
+ * only - niffies themselves are real nanoseconds, so anything converting the
+ * tick into niffies must use TICK_NSEC rather than the approximations here.
  */
 #define APPROX_NS_PS		(1073741824) /* Approximate ns per second */
-#define JIFFIES_TO_NS(TIME)	((TIME) * (APPROX_NS_PS / HZ))
 #define JIFFY_NS		(APPROX_NS_PS / HZ)
 #define JIFFY_US		(1048576 / HZ)
 #define NS_TO_JIFFIES(TIME)	((TIME) / JIFFY_NS)
@@ -351,29 +352,29 @@ static inline void update_rq_clock(struct rq *rq)
  * update_load_avg and time_slice_expired, however deadlines are based on them
  * across CPUs. Update them whenever we will call one of those functions, and
  * synchronise them across CPUs whenever we hold both runqueue locks.
+ *
+ * Niffies are the highest of two absolute values that each advance at real
+ * time: this runqueue's clock, and a tick line advanced by whole jiffies so
+ * that we keep counting if the rq clock stalls. Because both are absolute,
+ * time contributed by the tick line, or imported by synchronise_niffies(), is
+ * never counted again when the rq clock catches up - niffies simply stall
+ * until it does. Accumulating the maximum of the two *deltas* instead keeps
+ * every overshoot for good and drifts upwards without bound.
  */
 static inline void update_clocks(struct rq *rq)
 {
-	s64 ndiff, minndiff;
 	long jdiff;
 
 	update_rq_clock(rq);
-	ndiff = rq->clock - rq->old_clock;
-	rq->old_clock = rq->clock;
 	jdiff = jiffies - rq->last_jiffy;
-
-	/* Subtract any niffies added by balancing with other rqs */
-	ndiff -= rq->niffies - rq->last_niffy;
-	minndiff = JIFFIES_TO_NS(jdiff) - rq->niffies + rq->last_jiffy_niffies;
-	if (minndiff < 0)
-		minndiff = 0;
-	ndiff = max(ndiff, minndiff);
-	rq->niffies += ndiff;
-	rq->last_niffy = rq->niffies;
-	if (jdiff) {
+	if (jdiff > 0) {
 		rq->last_jiffy += jdiff;
-		rq->last_jiffy_niffies = rq->niffies;
+		rq->jiffy_niffies += (u64)jdiff * TICK_NSEC;
 	}
+	if (rq->niffies < rq->jiffy_niffies)
+		rq->niffies = rq->jiffy_niffies;
+	if (rq->niffies < rq->clock)
+		rq->niffies = rq->clock;
 }
 
 /*
@@ -8436,7 +8437,7 @@ void __init sched_init(void)
 		rq->nr_running = 0;
 		rq->nr_uninterruptible = 0;
 		rq->nr_switches = 0;
-		rq->clock = rq->old_clock = rq->last_niffy = rq->niffies = 0;
+		rq->clock = rq->niffies = rq->jiffy_niffies = 0;
 		rq->last_jiffy = jiffies;
 		rq->user_ns = rq->nice_ns = rq->softirq_ns = rq->system_ns =
 			      rq->iowait_ns = rq->idle_ns = 0;

@@ -233,8 +233,7 @@ struct rq {
 	unsigned long last_scheduler_tick; /* Last jiffy this RQ ticked */
 	unsigned long last_jiffy; /* Last jiffy this RQ updated rq clock */
 	u64 niffies; /* Last time this RQ updated rq clock */
-	u64 last_niffy; /* Last niffies as updated by local clock */
-	u64 last_jiffy_niffies; /* Niffies @ last_jiffy */
+	u64 jiffy_niffies; /* Niffies as counted by the tick alone */
 
 	u64 load_update; /* When we last updated load */
 	unsigned long load_avg; /* Rolling load average */
@@ -313,7 +312,7 @@ struct rq {
 	u64 prev_steal_time_rq;
 #endif /* CONFIG_PARAVIRT_TIME_ACCOUNTING */
 
-	u64 clock, old_clock, last_tick;
+	u64 clock, last_tick;
 	/* Ensure that all clocks are in the same cache line */
 	u64 clock_task ____cacheline_aligned;
 	int dither;
