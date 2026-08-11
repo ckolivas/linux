@@ -872,6 +872,23 @@ static inline void dec_nr_running(struct rq *rq)
 }
 
 /*
+ * A running task is off the skiplist, so its share of rt_nr_running is not
+ * maintained by the enqueue/dequeue pair; __schedule() hands that slot over on
+ * every switch instead. When a *running* task's priority crosses the rt
+ * boundary neither happens, so fix the count up here.
+ */
+static inline void rt_running_reprio(struct rq *rq, int oldprio, int newprio)
+{
+	if (!rt_prio(newprio) == !rt_prio(oldprio))
+		return;
+
+	if (rt_prio(newprio))
+		rq->rt_nr_running++;
+	else
+		rq->rt_nr_running--;
+}
+
+/*
  * Adding to the runqueue. Enter with rq locked.
  */
 static void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
@@ -4593,16 +4610,25 @@ static void __sched notrace __schedule(bool preempt)
 		/*
 		 * Don't reschedule an idle task or deactivated tasks
 		 */
-		if (prev == idle) {
+		if (prev == idle)
 			inc_nr_running(rq);
-			if (rt_task(next))
-				rq->rt_nr_running++;
-		} else if (!deactivate)
+		else if (!deactivate)
 			resched_suitable_idle(prev);
+		/*
+		 * The task on the CPU is not on the skiplist, so it holds a
+		 * count of its own on top of the queued ones. nr_running only
+		 * changes when that slot is created or destroyed - i.e. on the
+		 * idle transitions above and below - but rt_nr_running also
+		 * depends on *which* task holds it, so hand it over on every
+		 * switch. Leaving that to the idle transitions leaked a count
+		 * on every rt -> non-rt switch and underflowed on the reverse.
+		 */
+		if (prev != idle && rt_task(prev))
+			rq->rt_nr_running--;
+		if (next != idle && rt_task(next))
+			rq->rt_nr_running++;
 		if (unlikely(next == idle)) {
 			dec_nr_running(rq);
-			if (rt_task(prev))
-				rq->rt_nr_running--;
 			wake_siblings(rq);
 		} else
 			check_siblings(rq);
@@ -5264,6 +5290,7 @@ void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task)
 	oldprio = p->prio;
 	p->prio = prio;
 	if (task_running(rq, p)){
+		rt_running_reprio(rq, oldprio, prio);
 		if (prio > oldprio)
 			resched_task(p);
 	} else if (task_queued(p)) {
@@ -5592,6 +5619,7 @@ static void __setscheduler(struct task_struct *p, struct rq *rq, int policy,
 		p->prio = rt_effective_prio(p, p->prio);
 
 	if (task_running(rq, p)) {
+		rt_running_reprio(rq, oldprio, p->prio);
 		set_rq_task(rq, p);
 		resched_task(p);
 	} else if (task_queued(p)) {
