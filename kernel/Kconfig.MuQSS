@@ -11,6 +11,11 @@
 
 config SCHED_MUQSS
 	bool "MuQSS cpu scheduler"
+	# Architectures the port is built and tested on. Widening this needs
+	# arch review: <linux/sched/prio.h> gains a NORMAL_PRIO definition,
+	# which collides with the private one in
+	# arch/powerpc/platforms/cell/spufs/sched.c.
+	depends on X86 || ARM64
 	select HIGH_RES_TIMERS
 	default y
 	help

@@ -125,7 +125,7 @@ struct clone_args {
 #define SCHED_FIFO		1
 #define SCHED_RR		2
 #define SCHED_BATCH		3
-/* SCHED_ISO: reserved but not implemented yet */
+#define SCHED_ISO		4	/* Implemented on MuQSS only */
 #define SCHED_IDLE		5
 #define SCHED_DEADLINE		6
 #define SCHED_EXT		7

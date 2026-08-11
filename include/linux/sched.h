@@ -43,6 +43,9 @@
 #include <linux/restart_block.h>
 #include <linux/rseq_types.h>
 #include <linux/seqlock_types.h>
+#ifdef CONFIG_SCHED_MUQSS
+#include <linux/skip_list.h>
+#endif
 #include <linux/kcsan.h>
 #include <linux/rv.h>
 #include <linux/uidgid_types.h>
@@ -868,6 +871,22 @@ struct task_struct {
 	int				normal_prio;
 	unsigned int			rt_priority;
 
+#ifdef CONFIG_SCHED_MUQSS
+	int				time_slice;
+	u64				deadline;
+	skiplist_node			node; /* Skip list node */
+	u64				last_ran;
+	u64				sched_time; /* sched_clock time spent running */
+#ifdef CONFIG_SMT_NICE
+	int				smt_bias; /* Policy/nice level bias across smt siblings */
+#endif
+#ifdef CONFIG_HOTPLUG_CPU
+	bool				zerobound; /* Bound to CPU0 for hotplug */
+#endif
+	unsigned long			rt_timeout;
+	/* Unbanked cpu time */
+	unsigned long			utime_ns, stime_ns;
+#else /* CONFIG_SCHED_MUQSS */
 	struct sched_entity		se;
 	struct sched_rt_entity		rt;
 	struct sched_dl_entity		dl;
@@ -876,6 +895,7 @@ struct task_struct {
 	struct sched_ext_entity		scx;
 #endif
 	const struct sched_class	*sched_class;
+#endif /* CONFIG_SCHED_MUQSS */
 
 #ifdef CONFIG_SCHED_CORE
 	struct rb_node			core_node;
@@ -1651,6 +1671,8 @@ struct task_struct {
 	randomized_struct_fields_end
 } __attribute__ ((aligned (64)));
 
+#include <linux/muqss.h>
+
 #ifdef CONFIG_SCHED_PROXY_EXEC
 DECLARE_STATIC_KEY_TRUE(__sched_proxy_exec);
 static inline bool sched_proxy_exec(void)
@@ -2313,7 +2335,12 @@ static inline void set_task_cpu(struct task_struct *p, unsigned int cpu)
 
 static inline bool task_is_runnable(struct task_struct *p)
 {
+#ifdef CONFIG_SCHED_MUQSS
+	/* MuQSS has no delayed dequeue: queued means runnable. */
+	return p->on_rq;
+#else
 	return p->on_rq && !p->se.sched_delayed;
+#endif
 }
 
 extern bool sched_task_on_rq(struct task_struct *p);
