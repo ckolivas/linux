@@ -9,8 +9,51 @@
 #include <linux/timer.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/debug.h>
+#include <linux/sysctl.h>
 
 #include "tick-internal.h"
+
+/*
+ * Granularity, in microseconds, below which a high resolution timeout is not
+ * worth arming. Also caps how far clockevents_increase_min_delta() is allowed
+ * to raise a clock event device's minimum delta.
+ */
+int __read_mostly hrtimer_granularity_us = 100;
+
+/* The timeout, in microseconds, used by schedule_min_hrtimeout(). */
+int __read_mostly hrtimeout_min_us = 100;
+
+#ifdef CONFIG_SYSCTL
+static const int hrtimeout_us_max = 10000;
+
+static const struct ctl_table hrtimeout_sysctl[] = {
+	{
+		.procname	= "hrtimer_granularity_us",
+		.data		= &hrtimer_granularity_us,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ONE,
+		.extra2		= (void *)&hrtimeout_us_max,
+	},
+	{
+		.procname	= "hrtimeout_min_us",
+		.data		= &hrtimeout_min_us,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ONE,
+		.extra2		= (void *)&hrtimeout_us_max,
+	},
+};
+
+static int __init hrtimeout_sysctl_init(void)
+{
+	register_sysctl("kernel", hrtimeout_sysctl);
+	return 0;
+}
+device_initcall(hrtimeout_sysctl_init);
+#endif /* CONFIG_SYSCTL */
 
 /*
  * Since schedule_timeout()'s timer is defined on the stack, it must store
@@ -288,7 +331,7 @@ EXPORT_SYMBOL_GPL(schedule_hrtimeout);
 long __sched schedule_msec_hrtimeout(long timeout)
 {
 	struct hrtimer_sleeper t;
-	int delta, secs, jiffs;
+	int delta, jiffs;
 	ktime_t expires;
 
 	if (!timeout) {
@@ -306,9 +349,9 @@ long __sched schedule_msec_hrtimeout(long timeout)
 	if (jiffs > 4 || hrtimer_resolution >= NSEC_PER_SEC / HZ || pm_freezing)
 		return schedule_timeout(jiffs);
 
-	secs = timeout / 1000;
+	/* The jiffs > 4 test above bounds timeout well under one second. */
 	delta = (timeout % 1000) * NSEC_PER_MSEC;
-	expires = ktime_set(secs, delta);
+	expires = ktime_set(0, delta);
 
 	hrtimer_setup_sleeper_on_stack(&t, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	/*
@@ -335,9 +378,51 @@ long __sched schedule_msec_hrtimeout(long timeout)
 
 EXPORT_SYMBOL(schedule_msec_hrtimeout);
 
+/*
+ * As per schedule_msec_hrtimeout but takes a microsecond value and returns
+ * how many microseconds are left.
+ */
+static long __sched schedule_usec_hrtimeout(long timeout)
+{
+	struct hrtimer_sleeper t;
+	ktime_t expires;
+	int delta;
+
+	if (!timeout) {
+		__set_current_state(TASK_RUNNING);
+		return 0;
+	}
+
+	if (hrtimer_resolution >= NSEC_PER_SEC / HZ)
+		return schedule_timeout(usecs_to_jiffies(timeout));
+
+	if (timeout < hrtimer_granularity_us)
+		timeout = hrtimer_granularity_us;
+	delta = (timeout % USEC_PER_SEC) * NSEC_PER_USEC;
+	expires = ktime_set(0, delta);
+
+	hrtimer_setup_sleeper_on_stack(&t, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	/* No slack is given here, as per schedule_msec_hrtimeout(). */
+	hrtimer_set_expires(&t.timer, expires);
+
+	hrtimer_sleeper_start_expires(&t, HRTIMER_MODE_REL);
+
+	if (likely(t.task))
+		schedule();
+
+	hrtimer_cancel(&t.timer);
+	destroy_hrtimer_on_stack(&t.timer);
+
+	__set_current_state(TASK_RUNNING);
+
+	expires = hrtimer_expires_remaining(&t.timer);
+	timeout = ktime_to_us(expires);
+	return timeout < 0 ? 0 : timeout;
+}
+
 long __sched schedule_min_hrtimeout(void)
 {
-	return schedule_msec_hrtimeout(1);
+	return usecs_to_jiffies(schedule_usec_hrtimeout(hrtimeout_min_us));
 }
 
 EXPORT_SYMBOL(schedule_min_hrtimeout);

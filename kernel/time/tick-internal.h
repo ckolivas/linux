@@ -14,6 +14,9 @@ struct timer_events {
 	u64	global;
 };
 
+/* Defined in sleep_timeout.c, tunable via sysctl */
+extern int hrtimer_granularity_us;
+
 #ifdef CONFIG_GENERIC_CLOCKEVENTS
 
 # define TICK_DO_TIMER_NONE	-1
