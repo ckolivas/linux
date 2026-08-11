@@ -3957,7 +3957,15 @@ static void sched_tick_remote(struct work_struct *work)
 		delta = rq_clock_task(rq) - curr->last_ran;
 		WARN_ON_ONCE(delta > (u64)NSEC_PER_SEC * 3);
 	}
+	/*
+	 * task_tick() takes the rq lock itself when it needs to force a
+	 * reschedule so we must drop it here, keeping interrupts disabled
+	 * to match the context it is called in from sched_tick().
+	 */
+	rq_unlock(rq);
 	task_tick(rq);
+	local_irq_enable();
+	goto out_requeue;
 
 out_unlock:
 	rq_unlock_irq(rq, NULL);
