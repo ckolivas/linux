@@ -2433,7 +2433,7 @@ static void __init init_schedstats(void)
 	set_schedstats(__sched_schedstats);
 }
 
-#ifdef CONFIG_PROC_SYSCTL
+#ifdef CONFIG_SYSCTL
 static int sysctl_schedstats(const struct ctl_table *table, int write, void *buffer,
 		size_t *lenp, loff_t *ppos)
 {
@@ -2453,35 +2453,74 @@ static int sysctl_schedstats(const struct ctl_table *table, int write, void *buf
 		set_schedstats(state);
 	return err;
 }
-
-#ifdef CONFIG_SYSCTL
-/*
- * Mainline registers this from core.c; the sched sysctls now live beside the
- * code that implements them rather than in kernel/sysctl.c.
- */
-static const struct ctl_table muqss_schedstats_sysctls[] = {
-	{
-		.procname       = "sched_schedstats",
-		.data           = NULL,
-		.maxlen         = sizeof(unsigned int),
-		.mode           = 0644,
-		.proc_handler   = sysctl_schedstats,
-		.extra1         = SYSCTL_ZERO,
-		.extra2         = SYSCTL_ONE,
-	},
-};
-
-static int __init muqss_schedstats_sysctl_init(void)
-{
-	register_sysctl_init("kernel", muqss_schedstats_sysctls);
-	return 0;
-}
-late_initcall(muqss_schedstats_sysctl_init);
 #endif /* CONFIG_SYSCTL */
-#endif /* CONFIG_PROC_SYSCTL */
 #else  /* !CONFIG_SCHEDSTATS */
 static inline void init_schedstats(void) {}
 #endif /* CONFIG_SCHEDSTATS */
+
+#ifdef CONFIG_SYSCTL
+/*
+ * MuQSS tunables used to live in kernel/sysctl.c.  Mainline moved scheduler
+ * sysctls next to their implementation via register_sysctl_init(), so register
+ * ours the same way.  CFS/rt/fair knobs are not present under MuQSS.
+ */
+static const struct ctl_table muqss_sysctls[] = {
+	{
+		.procname	= "rr_interval",
+		.data		= &rr_interval,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ONE,
+		.extra2		= SYSCTL_ONE_THOUSAND,
+	},
+	{
+		.procname	= "interactive",
+		.data		= &sched_interactive,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
+	{
+		.procname	= "iso_cpu",
+		.data		= &sched_iso_cpu,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE_HUNDRED,
+	},
+	{
+		.procname	= "yield_type",
+		.data		= &sched_yield_type,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_TWO,
+	},
+#ifdef CONFIG_SCHEDSTATS
+	{
+		.procname	= "sched_schedstats",
+		.data		= NULL,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= sysctl_schedstats,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
+#endif
+};
+
+static int __init muqss_sysctl_init(void)
+{
+	register_sysctl_init("kernel", muqss_sysctls);
+	return 0;
+}
+late_initcall(muqss_sysctl_init);
+#endif /* CONFIG_SYSCTL */
 
 static void update_cpu_clock_switch(struct rq *rq, struct task_struct *p);
 
@@ -8002,6 +8041,12 @@ int in_sched_functions(unsigned long addr)
 }
 
 #ifdef CONFIG_CGROUP_SCHED
+/*
+ * Default CFS bandwidth period (100ms).  Used only for accept-and-ignore
+ * readback of cpu.max / cfs_period_us — MuQSS does not enforce quotas.
+ */
+#define MUQSS_CGROUP_PERIOD_DFL_US	100000ULL
+
 /* task group related information */
 struct task_group {
 	struct cgroup_subsys_state css;
@@ -8012,6 +8057,17 @@ struct task_group {
 	struct task_group *parent;
 	struct list_head siblings;
 	struct list_head children;
+
+	/*
+	 * cpu controller knobs stored for ABI/readback only.  Writes are
+	 * validated then ignored for scheduling — MuQSS has no group fairness
+	 * or bandwidth enforcement.  Keeps systemd/docker/podman happy.
+	 */
+	unsigned long weight;	/* cgroup weight [CGROUP_WEIGHT_MIN, MAX] */
+	s64 idle;
+	u64 period_us;
+	s64 quota_us;		/* -1 == unlimited ("max") */
+	u64 burst_us;
 };
 
 /*
@@ -8023,6 +8079,15 @@ LIST_HEAD(task_groups);
 
 /* Cacheline aligned slab cache for task_group */
 static struct kmem_cache *task_group_cache __read_mostly;
+
+static void init_tg_cgroup_defaults(struct task_group *tg)
+{
+	tg->weight = CGROUP_WEIGHT_DFL;
+	tg->idle = 0;
+	tg->period_us = MUQSS_CGROUP_PERIOD_DFL_US;
+	tg->quota_us = -1;
+	tg->burst_us = 0;
+}
 #endif /* CONFIG_CGROUP_SCHED */
 
 void __init sched_init(void)
@@ -8054,6 +8119,7 @@ void __init sched_init(void)
 	list_add(&root_task_group.list, &task_groups);
 	INIT_LIST_HEAD(&root_task_group.children);
 	INIT_LIST_HEAD(&root_task_group.siblings);
+	init_tg_cgroup_defaults(&root_task_group);
 #endif /* CONFIG_CGROUP_SCHED */
 	for_each_possible_cpu(i) {
 		rq = cpu_rq(i);
@@ -8393,6 +8459,7 @@ struct task_group *sched_create_group(struct task_group *parent)
 	if (!tg)
 		return ERR_PTR(-ENOMEM);
 
+	init_tg_cgroup_defaults(tg);
 	return tg;
 }
 
@@ -8480,11 +8547,287 @@ static void cpu_cgroup_attach(struct cgroup_taskset *tset)
 {
 }
 
+/*
+ * Accept-and-ignore cpu controller files.
+ *
+ * Mainline wires these to CFS shares/bandwidth.  MuQSS has neither, but
+ * container runtimes and systemd write CPUWeight=/CPUQuota=/--cpus and
+ * fail if the files are missing.  Validate ranges, store for readback,
+ * and leave scheduling unaffected.
+ *
+ * nice↔weight table matches CFS (sched_prio_to_weight) so weight.nice
+ * round-trips to the same values userspace expects.
+ */
+static const int muqss_prio_to_weight[40] = {
+ /* -20 */     88761,     71755,     56483,     46273,     36291,
+ /* -15 */     29154,     23254,     18705,     14949,     11916,
+ /* -10 */      9548,      7620,      6100,      4904,      3906,
+ /*  -5 */      3121,      2501,      1991,      1586,      1277,
+ /*   0 */      1024,       820,       655,       526,       423,
+ /*   5 */       335,       272,       215,       172,       137,
+ /*  10 */       110,        87,        70,        56,        45,
+ /*  15 */        36,        29,        23,        18,        15,
+};
+
+static unsigned long muqss_weight_from_cgroup(unsigned long cgrp_weight)
+{
+	return DIV_ROUND_CLOSEST_ULL(cgrp_weight * 1024, CGROUP_WEIGHT_DFL);
+}
+
+static unsigned long muqss_weight_to_cgroup(unsigned long weight)
+{
+	return clamp_t(unsigned long,
+		       DIV_ROUND_CLOSEST_ULL(weight * CGROUP_WEIGHT_DFL, 1024),
+		       CGROUP_WEIGHT_MIN, CGROUP_WEIGHT_MAX);
+}
+
+static u64 cpu_weight_read_u64(struct cgroup_subsys_state *css,
+			       struct cftype *cft)
+{
+	return css_tg(css)->weight;
+}
+
+static int cpu_weight_write_u64(struct cgroup_subsys_state *css,
+				struct cftype *cft, u64 cgrp_weight)
+{
+	if (cgrp_weight < CGROUP_WEIGHT_MIN || cgrp_weight > CGROUP_WEIGHT_MAX)
+		return -ERANGE;
+
+	css_tg(css)->weight = cgrp_weight;
+	return 0;
+}
+
+static s64 cpu_weight_nice_read_s64(struct cgroup_subsys_state *css,
+				    struct cftype *cft)
+{
+	unsigned long weight = muqss_weight_from_cgroup(css_tg(css)->weight);
+	int last_delta = INT_MAX;
+	int prio, delta;
+
+	for (prio = 0; prio < ARRAY_SIZE(muqss_prio_to_weight); prio++) {
+		delta = abs(muqss_prio_to_weight[prio] - (int)weight);
+		if (delta >= last_delta)
+			break;
+		last_delta = delta;
+	}
+
+	return PRIO_TO_NICE(prio - 1 + MAX_RT_PRIO);
+}
+
+static int cpu_weight_nice_write_s64(struct cgroup_subsys_state *css,
+				     struct cftype *cft, s64 nice)
+{
+	int idx;
+
+	if (nice < MIN_NICE || nice > MAX_NICE)
+		return -ERANGE;
+
+	idx = NICE_TO_PRIO(nice) - MAX_RT_PRIO;
+	idx = array_index_nospec(idx, ARRAY_SIZE(muqss_prio_to_weight));
+	css_tg(css)->weight =
+		muqss_weight_to_cgroup(muqss_prio_to_weight[idx]);
+	return 0;
+}
+
+static s64 cpu_idle_read_s64(struct cgroup_subsys_state *css,
+			     struct cftype *cft)
+{
+	return css_tg(css)->idle;
+}
+
+static int cpu_idle_write_s64(struct cgroup_subsys_state *css,
+			      struct cftype *cft, s64 idle)
+{
+	if (idle != 0 && idle != 1)
+		return -EINVAL;
+
+	css_tg(css)->idle = idle;
+	return 0;
+}
+
+static void cpu_period_quota_print(struct seq_file *sf, long period, long quota)
+{
+	if (quota < 0)
+		seq_puts(sf, "max");
+	else
+		seq_printf(sf, "%ld", quota);
+
+	seq_printf(sf, " %ld\n", period);
+}
+
+static int cpu_period_quota_parse(char *buf, u64 *period_us_p, u64 *quota_us_p)
+{
+	char tok[21];	/* U64_MAX */
+
+	if (sscanf(buf, "%20s %llu", tok, period_us_p) < 1)
+		return -EINVAL;
+
+	if (sscanf(tok, "%llu", quota_us_p) < 1) {
+		if (!strcmp(tok, "max"))
+			*quota_us_p = U64_MAX;
+		else
+			return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int cpu_max_show(struct seq_file *sf, void *v)
+{
+	struct task_group *tg = css_tg(seq_css(sf));
+	s64 quota = tg->quota_us;
+
+	cpu_period_quota_print(sf, tg->period_us, quota);
+	return 0;
+}
+
+static ssize_t cpu_max_write(struct kernfs_open_file *of,
+			     char *buf, size_t nbytes, loff_t off)
+{
+	struct task_group *tg = css_tg(of_css(of));
+	u64 period_us = tg->period_us, quota_us;
+	int ret;
+
+	ret = cpu_period_quota_parse(buf, &period_us, &quota_us);
+	if (ret)
+		return ret;
+
+	if (!period_us || period_us > USEC_PER_SEC)
+		return -EINVAL;
+
+	tg->period_us = period_us;
+	tg->quota_us = (quota_us == U64_MAX) ? -1 : (s64)quota_us;
+	return nbytes;
+}
+
+static u64 cpu_burst_read_u64(struct cgroup_subsys_state *css,
+			      struct cftype *cft)
+{
+	return css_tg(css)->burst_us;
+}
+
+static int cpu_burst_write_u64(struct cgroup_subsys_state *css,
+			       struct cftype *cft, u64 burst_us)
+{
+	struct task_group *tg = css_tg(css);
+
+	/* Burst must not exceed a finite quota when one is set. */
+	if (tg->quota_us >= 0 && burst_us > (u64)tg->quota_us)
+		return -EINVAL;
+
+	tg->burst_us = burst_us;
+	return 0;
+}
+
+/* Legacy v1 interfaces */
+static u64 cpu_shares_read_u64(struct cgroup_subsys_state *css,
+			       struct cftype *cft)
+{
+	return muqss_weight_from_cgroup(css_tg(css)->weight);
+}
+
+static int cpu_shares_write_u64(struct cgroup_subsys_state *css,
+				struct cftype *cft, u64 share)
+{
+	if (share < 2 || share > 262144)
+		return -ERANGE;
+
+	css_tg(css)->weight = muqss_weight_to_cgroup(share);
+	return 0;
+}
+
+static u64 cpu_period_read_u64(struct cgroup_subsys_state *css,
+			       struct cftype *cft)
+{
+	return css_tg(css)->period_us;
+}
+
+static int cpu_period_write_u64(struct cgroup_subsys_state *css,
+				struct cftype *cft, u64 period_us)
+{
+	if (!period_us || period_us > USEC_PER_SEC)
+		return -EINVAL;
+
+	css_tg(css)->period_us = period_us;
+	return 0;
+}
+
+static s64 cpu_quota_read_s64(struct cgroup_subsys_state *css,
+			      struct cftype *cft)
+{
+	return css_tg(css)->quota_us;
+}
+
+static int cpu_quota_write_s64(struct cgroup_subsys_state *css,
+			       struct cftype *cft, s64 quota_us)
+{
+	if (quota_us < -1 || quota_us > (s64)USEC_PER_SEC * 1024)
+		return -EINVAL;
+
+	css_tg(css)->quota_us = quota_us;
+	return 0;
+}
+
 static struct cftype cpu_legacy_files[] = {
+	{
+		.name = "shares",
+		.read_u64 = cpu_shares_read_u64,
+		.write_u64 = cpu_shares_write_u64,
+	},
+	{
+		.name = "idle",
+		.read_s64 = cpu_idle_read_s64,
+		.write_s64 = cpu_idle_write_s64,
+	},
+	{
+		.name = "cfs_period_us",
+		.read_u64 = cpu_period_read_u64,
+		.write_u64 = cpu_period_write_u64,
+	},
+	{
+		.name = "cfs_quota_us",
+		.read_s64 = cpu_quota_read_s64,
+		.write_s64 = cpu_quota_write_s64,
+	},
+	{
+		.name = "cfs_burst_us",
+		.read_u64 = cpu_burst_read_u64,
+		.write_u64 = cpu_burst_write_u64,
+	},
 	{ }	/* Terminate */
 };
 
 static struct cftype cpu_files[] = {
+	{
+		.name = "weight",
+		.flags = CFTYPE_NOT_ON_ROOT,
+		.read_u64 = cpu_weight_read_u64,
+		.write_u64 = cpu_weight_write_u64,
+	},
+	{
+		.name = "weight.nice",
+		.flags = CFTYPE_NOT_ON_ROOT,
+		.read_s64 = cpu_weight_nice_read_s64,
+		.write_s64 = cpu_weight_nice_write_s64,
+	},
+	{
+		.name = "idle",
+		.flags = CFTYPE_NOT_ON_ROOT,
+		.read_s64 = cpu_idle_read_s64,
+		.write_s64 = cpu_idle_write_s64,
+	},
+	{
+		.name = "max",
+		.flags = CFTYPE_NOT_ON_ROOT,
+		.seq_show = cpu_max_show,
+		.write = cpu_max_write,
+	},
+	{
+		.name = "max.burst",
+		.flags = CFTYPE_NOT_ON_ROOT,
+		.read_u64 = cpu_burst_read_u64,
+		.write_u64 = cpu_burst_write_u64,
+	},
 	{ }	/* terminate */
 };
 
@@ -8503,7 +8846,6 @@ struct cgroup_subsys cpu_cgrp_subsys = {
 	.fork		= cpu_cgroup_fork,
 	.can_attach	= cpu_cgroup_can_attach,
 	.attach		= cpu_cgroup_attach,
-	.legacy_cftypes	= cpu_files,
 	.legacy_cftypes	= cpu_legacy_files,
 	.dfl_cftypes	= cpu_files,
 	.early_init	= true,
