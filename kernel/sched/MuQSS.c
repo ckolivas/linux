@@ -1178,14 +1178,20 @@ static inline void resched_idle(struct rq *rq)
 
 	rq->preempt = rq->idle;
 
-	set_tsk_need_resched(rq->idle);
-
 	if (rq_local(rq)) {
+		set_tsk_need_resched(rq->idle);
 		set_preempt_need_resched();
 		return;
 	}
 
-	smp_sched_reschedule(rq->cpu);
+	/*
+	 * Atomically set NEED_RESCHED and only IPI if the idle task is not
+	 * polling — same protocol as resched_curr / wake_up_idle_cpu.
+	 */
+	if (set_nr_and_not_polling(rq->idle))
+		smp_sched_reschedule(rq->cpu);
+	else
+		trace_sched_wake_idle_without_ipi(rq->cpu);
 }
 
 DEFINE_PER_CPU(cpumask_t, idlemask);
@@ -1876,15 +1882,15 @@ void wake_up_if_idle(int cpu)
 	if (!is_idle_task(rcu_dereference(rq->curr)))
 		goto out;
 
-	if (set_nr_if_polling(rq->idle)) {
-		trace_sched_wake_idle_without_ipi(cpu);
-	} else {
-		rq_lock_irqsave(rq, &rf);
-		if (likely(is_idle_task(rq->curr)))
-			smp_sched_reschedule(cpu);
-		/* Else cpu is not in idle, do nothing here */
-		rq_unlock_irqrestore(rq, &rf);
-	}
+	/*
+	 * Match mainline: always go through resched_curr so TIF_NEED_RESCHED
+	 * is set before any IPI.  Sending a reschedule IPI alone does nothing
+	 * useful — scheduler_ipi() only folds an already-set need_resched.
+	 */
+	rq_lock_irqsave(rq, &rf);
+	if (is_idle_task(rq->curr))
+		resched_curr(rq);
+	rq_unlock_irqrestore(rq, &rf);
 
 out:
 	rcu_read_unlock();
@@ -2491,20 +2497,40 @@ bool sched_smp_initialized __read_mostly;
 
 static inline int hrexpiry_enabled(struct rq *rq)
 {
-	if (unlikely(!cpu_active(cpu_of(rq)) || !sched_smp_initialized))
-		return 0;
-	return hrtimer_resolution != LOW_RES_NSEC;
+	/*
+	 * Disabled for the 7.1 port.  Starting/canceling a non-HARD hrtimer
+	 * from set_rq_task() on every context switch reprograms the oneshot
+	 * clockevent under the rq lock; on SMP under highres that races with
+	 * the tick/timer softirq path and starves TIMER_SOFTIRQ (RCU GP
+	 * kthread "timer wakeup didn't happen").  Verified: highres=off (no
+	 * hrexpiry) boots 2-CPU reliably; with hrexpiry the hang is flaky but
+	 * frequent.  Mainline solved the same class of bug with hrtick +
+	 * HRTIMER_MODE_LAZY_REARM and deferred start/cancel around schedule().
+	 * Until MuQSS grows that deferral, fall back to tick/dither timeslice
+	 * expiry (rq_dither / task_running_tick).  System highres timers are
+	 * unaffected.
+	 */
+	return 0;
 }
 
 /*
  * Use HR-timers to deliver accurate preemption points.
+ *
+ * Must be safe under the runqueue lock with IRQs off: never use the blocking
+ * hrtimer_cancel(), and use HARD|LAZY_REARM so we do not thrash the oneshot
+ * clockevent on every context switch (that loses timer IRQs on SMP under
+ * highres — RCU/timer softirq starvation).  Same rationale as mainline
+ * hrtick + HRTIMER_MODE_LAZY_REARM.
  */
 static inline void hrexpiry_clear(struct rq *rq)
 {
 	if (!hrexpiry_enabled(rq))
 		return;
-	if (hrtimer_active(&rq->hrexpiry_timer))
-		hrtimer_cancel(&rq->hrexpiry_timer);
+	/*
+	 * try_to_cancel does not wait for a running callback, so it cannot
+	 * deadlock against the hardirq path while we hold the rq lock.
+	 */
+	hrtimer_try_to_cancel(&rq->hrexpiry_timer);
 }
 
 /*
@@ -2535,20 +2561,34 @@ out:
 /*
  * Called to set the hrexpiry timer state.
  *
- * called with irqs disabled from the local CPU only
+ * Called with irqs disabled from the local CPU only, typically under the
+ * runqueue lock from set_rq_task().
  */
 static void hrexpiry_start(struct rq *rq, u64 delay)
 {
 	if (!hrexpiry_enabled(rq))
 		return;
 
+	/*
+	 * Slices shorter than 10us are not useful and can DoS the timer
+	 * subsystem with reprogramming (same floor as mainline hrtick).
+	 */
+	if (delay < 10000ULL)
+		delay = 10000ULL;
+
+	/*
+	 * REL_PINNED_HARD: hardirq callback on this CPU.
+	 * LAZY_REARM was set at setup so restarting into the future does not
+	 * force a clockevent reprogram when we remain the first expiry.
+	 */
 	hrtimer_start(&rq->hrexpiry_timer, ns_to_ktime(delay),
-		      HRTIMER_MODE_REL_PINNED);
+		      HRTIMER_MODE_REL_PINNED_HARD);
 }
 
 static void init_rq_hrexpiry(struct rq *rq)
 {
-	hrtimer_setup(&rq->hrexpiry_timer, hrexpiry, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	hrtimer_setup(&rq->hrexpiry_timer, hrexpiry, CLOCK_MONOTONIC,
+		      HRTIMER_MODE_REL_HARD | HRTIMER_MODE_LAZY_REARM);
 }
 
 static inline int rq_dither(struct rq *rq)
@@ -7653,12 +7693,17 @@ static void __init select_leaders(void)
  * lock_all_rqs().  Secondary CPUs may already have tasks queued by the time
  * sched_init_smp() runs (hotplug kthreads, RCU, early kworkers), so the
  * skiplist must be drained onto the leader before its storage is freed.
- * The follower's private lock is unlocked and freed; its lock pointer is
- * then switched to the still-held leader lock.
+ *
+ * Lock handoff: reassign rq->lock to the leader *before* dropping the
+ * follower's private lock, so new lockers never see a freed pointer.  Then
+ * re-acquire/drop the old lock once to wait out any remote CPU that spun on
+ * it, and only then free.
  */
 static void __init share_and_free_rq(struct rq *leader, struct rq *rq)
 {
 	raw_spinlock_t *old_lock = rq->lock;
+	skiplist_node *old_node = rq->node;
+	skiplist *old_sl = rq->sl;
 
 	/* Move every queued task onto the leader skiplist. */
 	while (rq->sl->entries > 0) {
@@ -7676,19 +7721,31 @@ static void __init share_and_free_rq(struct rq *leader, struct rq *rq)
 	WARN_ON_ONCE(rq->sl->entries != 0);
 
 	/*
-	 * Drop the follower's private lock before freeing it.  lock_all_rqs()
-	 * took it; after this only the leader lock remains held for @rq.
+	 * Publish shared state while still holding old_lock.  Remote CPUs
+	 * that load rq->lock after this take the leader lock; those already
+	 * spinning on old_lock continue until we drop it below.
 	 */
-	do_raw_spin_unlock(old_lock);
-
-	kfree(rq->node);
-	kfree(rq->sl);
-	kfree(old_lock);
 	rq->node = leader->node;
 	rq->sl = leader->sl;
 	rq->lock = leader->lock;
 	rq->is_leader = false;
-	barrier();
+	/*
+	 * Pair with remote rq_lock(): ensure rq->lock is visible before
+	 * old_lock is released.
+	 */
+	smp_wmb();
+
+	do_raw_spin_unlock(old_lock);
+	/*
+	 * Drain any remote holder that acquired old_lock after our unlock.
+	 * Once we take and drop it again, no CPU can still hold it.
+	 */
+	do_raw_spin_lock(old_lock);
+	do_raw_spin_unlock(old_lock);
+
+	kfree(old_node);
+	kfree(old_sl);
+	kfree(old_lock);
 }
 
 /*
