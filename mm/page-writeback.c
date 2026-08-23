@@ -38,6 +38,7 @@
 #include <linux/sched/rt.h>
 #include <linux/sched/signal.h>
 #include <linux/mm_inline.h>
+#include <linux/muqss_iotime.h>
 #include <linux/shmem_fs.h>
 #include <trace/events/writeback.h>
 
@@ -2635,6 +2636,12 @@ static void folio_account_dirtied(struct folio *folio,
 		task_io_account_write(nr * PAGE_SIZE);
 		current->nr_dirtied += nr;
 		__this_cpu_add(bdp_ratelimits, nr);
+
+		/*
+		 * Record who dirtied this so the writeback issued for it later
+		 * by a flusher thread can still be charged to them.
+		 */
+		muqss_iotime_dirty_folio(folio);
 
 		mem_cgroup_track_foreign_dirty(folio, wb);
 	}

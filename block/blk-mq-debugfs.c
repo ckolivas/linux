@@ -757,6 +757,8 @@ static const char *rq_qos_id_to_name(enum rq_qos_id id)
 		return "latency";
 	case RQ_QOS_COST:
 		return "cost";
+	case RQ_QOS_MUQSS_IOTIME:
+		return "iotime";
 	}
 	return "unknown";
 }

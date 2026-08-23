@@ -147,6 +147,54 @@ config SHARERQ
 	default 4 if RQ_SMP
 	default 5 if RQ_ALL
 
+config MUQSS_IOTIME
+	bool "I/O aware CPU scheduling support"
+	depends on SCHED_MUQSS && BLOCK
+	default y
+	help
+	  Ordinarily the CPU scheduler can see how much CPU a task uses, but it
+	  is blind to how much block device time that task consumes. A task
+	  that keeps a disk busy on everyone else's behalf looks identical to
+	  one that is merely idle, so it keeps full CPU priority while other
+	  tasks wait behind its I/O.
+
+	  This option attaches the scheduler to the block layer so that the
+	  time a device spends servicing each request is attributed back to the
+	  task that asked for it, and accumulates that as a per task I/O time
+	  figure. It is exported per task through /proc/<pid>/iotime and per
+	  device through debugfs.
+
+	  That figure is charged against the task's virtual deadline, demoting a
+	  task in proportion to the device time it consumed. This stops a task
+	  that keeps a disk busy on everybody else's behalf from retaining full
+	  CPU priority for free, while leaving tasks that merely wait on I/O as
+	  responsive as they are now.
+
+	  The charge is one nanosecond of deadline per nanosecond of device
+	  time, so I/O and CPU cost a task equally. That rate is what the
+	  feature means rather than a setting within it, so there is nothing to
+	  tune it by.
+
+	  The same machinery charges a task for kernel work done in another
+	  thread's context on its behalf, which today means kworkers running
+	  work items it queued. Kernel work a task asks for in its own context
+	  needs no such help, since it already comes out of that task's own
+	  timeslice; what escapes the scheduler is the work handed to somebody
+	  else, and forcing IRQ threading moves more work into that blind spot.
+	  That is charged one for one, since a nanosecond of CPU time costs the
+	  same wherever the kernel chose to spend it. It is reported alongside
+	  the I/O figures.
+
+	  Doing this costs a timestamp and an owner reference on every block
+	  request, and an accounting update on every completion. On very fast
+	  devices, or under heavy small random I/O, that overhead is measurable
+	  and may reduce peak I/O throughput. Say N if you are tuning purely
+	  for storage benchmarks.
+
+	  When disabled this is compiled out entirely and costs nothing.
+
+	  If unsure, say Y.
+
 #
 # Mainline features MuQSS replaces or does not implement are gated with
 # "depends on !SCHED_MUQSS" at their point of definition. Kconfig scopes a

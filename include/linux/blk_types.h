@@ -252,11 +252,23 @@ struct bio {
 	 * on release of the bio.
 	 */
 	struct blkcg_gq		*bi_blkg;
-	/* Time that this bio was issued. */
-	u64			issue_time_ns;
 #ifdef CONFIG_BLK_CGROUP_IOCOST
 	u64			bi_iocost_cost;
 #endif
+#endif
+
+	/*
+	 * Time that this bio was issued. Wanted by blkcg accounting and by
+	 * MuQSS I/O aware scheduling, which must work on kernels built
+	 * without any block cgroup support.
+	 */
+#if defined(CONFIG_BLK_CGROUP) || defined(CONFIG_MUQSS_IOTIME)
+	u64			issue_time_ns;
+#endif
+
+#ifdef CONFIG_MUQSS_IOTIME
+	/* Task this I/O is being done for. Holds a reference. */
+	struct task_struct	*bi_muqss_owner;
 #endif
 
 #ifdef CONFIG_BLK_INLINE_ENCRYPTION

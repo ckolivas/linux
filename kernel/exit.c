@@ -34,6 +34,7 @@
 #include <linux/mount.h>
 #include <linux/proc_fs.h>
 #include <linux/kthread.h>
+#include <linux/muqss_iotime.h>
 #include <linux/mempolicy.h>
 #include <linux/taskstats_kern.h>
 #include <linux/delayacct.h>
@@ -1032,6 +1033,9 @@ void __noreturn do_exit(long code)
 
 	if (tsk->io_context)
 		exit_io_context(tsk);
+
+	/* Give up the I/O owner table slot used to attribute writeback. */
+	muqss_iotime_release_slot(tsk);
 
 	if (tsk->splice_pipe)
 		free_pipe_info(tsk->splice_pipe);

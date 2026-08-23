@@ -56,6 +56,7 @@
 #include <linux/task_work.h>
 #include <linux/io_uring.h>
 #include <linux/io_uring/cmd.h>
+#include <linux/muqss_iotime.h>
 #include <linux/audit.h>
 #include <linux/security.h>
 #include <linux/jump_label.h>
@@ -1531,7 +1532,19 @@ fail:
 	}
 
 	do {
+		struct task_struct *prev;
+
+		/*
+		 * Anything this issue submits to the block layer is being done
+		 * on behalf of the task that queued the request, not this
+		 * worker. Publish it so the I/O is charged to the right task;
+		 * req->tctx pins it for the duration.
+		 */
+		prev = muqss_iotime_proxy_begin(req->tctx ? req->tctx->task :
+						NULL);
 		ret = io_issue_sqe(req, issue_flags);
+		muqss_iotime_proxy_end(prev);
+
 		if (ret != -EAGAIN)
 			break;
 

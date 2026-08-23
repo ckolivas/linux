@@ -61,6 +61,7 @@
 #include <linux/completion.h>
 #include <linux/hrtimer_rearm.h>
 #include <linux/livepatch_sched.h>
+#include <linux/muqss_iotime.h>
 #include <linux/smp.h>
 
 #include <asm/irq_regs.h>
@@ -751,6 +752,154 @@ static inline int ms_longest_deadline_diff(void)
 	return NS_TO_MS(longest_deadline_diff());
 }
 
+#ifdef CONFIG_MUQSS_IOTIME
+/*
+ * Scale an I/O time penalty by nice level, exactly as prio_deadline_diff()
+ * scales rr_interval. A deadline is virtual time, already stretched by
+ * prio_ratios[] before it means anything; adding raw nanoseconds of device
+ * time to it mixes two different currencies. Passing the penalty through the
+ * same ratio makes it commensurate with the deadline it is added to, so a
+ * given amount of I/O costs a task the same share of its own allotment
+ * whatever its nice level, and a niced down task is pushed back further in
+ * absolute terms than a niced up one for the same device time.
+ *
+ * The multiply is 64 bit, as it is in prio_deadline_diff(). Wrapping it would
+ * need a penalty over U64_MAX / prio_ratios[39], which is some forty days of
+ * device occupancy charged to one task between two scheduling events, so it
+ * is not a case worth writing code for.
+ */
+static inline u64 prio_penalty_diff(int user_prio, u64 penalty)
+{
+	return penalty * prio_ratios[user_prio] / 128;
+}
+
+/*
+ * Idleprio tasks are charged at the highest nice level whatever nice value
+ * they happen to carry. SCHED_IDLEPRIO is a class beneath the whole nice
+ * range rather than a position within it, and a task there has said it should
+ * run only when nothing else wants the CPU. Scaling by its own nice would let
+ * an idleprio task sitting at nice -20 be charged the lightest rate of all
+ * for keeping the disk busy, which is backwards. Their deadlines already sort
+ * below everything else in enqueue_task(); this keeps what they are charged
+ * for I/O consistent with that.
+ */
+static inline u64 task_penalty_diff(struct task_struct *p, u64 penalty)
+{
+	if (idleprio_task(p))
+		return prio_penalty_diff(39, penalty);
+
+	return prio_penalty_diff(TASK_USER_PRIO(p), penalty);
+}
+#endif
+
+#ifdef CONFIG_MUQSS_IOTIME
+/*
+ * Take the block device time accumulated on this task's behalf since it was
+ * last charged, and convert it to an amount of virtual deadline to push the
+ * task back by. The debt is consumed as it is read, so each nanosecond of
+ * device time demotes the task exactly once no matter which caller gets to it
+ * first. The charge is added to the deadline, so it is a demotion, not a
+ * boost: a task that keeps a device busy for everybody else stops getting
+ * full CPU priority for free.
+ *
+ * Charged one for one, a nanosecond of deadline for each nanosecond of device
+ * time consumed. That rate says device time and CPU time cost a task the
+ * same, which is the premise of the feature rather than a setting within it,
+ * so there is nothing to weight one against the other with.
+ *
+ * The charge is then scaled by nice through task_penalty_diff(), the same way
+ * rr_interval is, so that it is in the same virtual currency as the deadline
+ * it is added to. One for one is therefore one for one in deadline terms
+ * rather than in raw nanoseconds: at nice 0 the ratio is prio_ratios[20] /
+ * 128, about 6.7, exactly as an ordinary nice 0 timeslice is worth 6.7
+ * rr_intervals of deadline.
+ *
+ * There is no ceiling. A task that keeps a device busy can be demoted
+ * arbitrarily far behind, past the deadline of the lowest nice level. See
+ * MuQSS-iotime-design.md.
+ *
+ * This has to be consumed from both time_slice_expired() and enqueue_task().
+ * Expiry alone misses the streaming reader, which blocks before exhausting its
+ * slice and so never refreshes its deadline. Enqueue alone is not enough
+ * either: time_slice_expired() assigns the deadline absolutely, resetting the
+ * task to an uncharged baseline, and two of its callers (sched_yield() and
+ * yield_to()) have no enqueue behind them to reapply the charge.
+ */
+static inline u64 consume_iotime_penalty(struct task_struct *p)
+{
+	u64 debt = atomic64_xchg(&p->io_debt_ns, 0);
+
+	if (!debt)
+		return 0;
+
+	return task_penalty_diff(p, debt);
+}
+
+/*
+ * The same for CPU time spent in another thread's context on this task's
+ * behalf, which today means kworkers running work items it queued.
+ *
+ * Charged one for one, as device time is. A nanosecond of CPU time is a
+ * nanosecond of CPU time wherever it was spent, and the whole premise
+ * here is that the thread it was spent in should not decide whether it counts.
+ * Work a task asks for in its own context is already charged at exactly that
+ * rate: update_cpu_clock_switch() and update_cpu_clock_tick() deduct it from
+ * ->time_slice with no regard for which mode it was spent in, so a task that
+ * burns its whole quantum inside a syscall is demoted as surely as one that
+ * spun in userspace. Charging deferred work at anything other than parity
+ * would say that where the kernel chose to do the work changes what it cost,
+ * which is the bug this exists to fix. Forcing IRQ threading, as -ck does,
+ * only moves more work into that blind spot.
+ *
+ * It is still scaled by nice through task_penalty_diff(), like every other
+ * addition to a deadline, so that it is in the same virtual currency as the
+ * deadline it lands on.
+ *
+ * As with iotime there is no ceiling. The runaway this invites is a different
+ * shape to the I/O case and worth naming, because here CPU consumption is
+ * being punished with CPU demotion: a demoted task need not stop generating
+ * the work, so it can be starved while kworkers keep charging it. It is
+ * bounded in practice because the debt a task can accrue is bounded by the
+ * work it queued, and a task demoted enough to stop running stops queueing
+ * more.
+ *
+ * Kept as a separate counter from io_debt_ns rather than folded into it,
+ * because the two are quantities of very different size: work item runtimes
+ * are microseconds where device occupancy is milliseconds, and sharing an
+ * accumulator would let one vanish into the rounding of the other. Separate
+ * also keeps them separable in /proc/<pid>/iotime when the question is why a
+ * task was demoted.
+ */
+static inline u64 consume_kerntime_penalty(struct task_struct *p)
+{
+	u64 debt = atomic64_xchg(&p->kern_debt_ns, 0);
+
+	if (!debt)
+		return 0;
+
+	return task_penalty_diff(p, debt);
+}
+#else
+static inline u64 consume_iotime_penalty(struct task_struct *p)
+{
+	return 0;
+}
+
+static inline u64 consume_kerntime_penalty(struct task_struct *p)
+{
+	return 0;
+}
+#endif
+
+/*
+ * Everything charged against a task's deadline that did not come out of its
+ * own time_slice.
+ */
+static inline u64 consume_task_penalty(struct task_struct *p)
+{
+	return consume_iotime_penalty(p) + consume_kerntime_penalty(p);
+}
+
 static inline bool rq_local(struct rq *rq);
 
 #ifndef SCHED_CAPACITY_SCALE
@@ -925,7 +1074,7 @@ static inline void rt_running_reprio(struct rq *rq, int oldprio, int newprio)
 static void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
 {
 	unsigned int randseed, cflags = 0;
-	u64 sl_id;
+	u64 sl_id, penalty;
 
 	if (!rt_task(p)) {
 		/* Check it hasn't gotten rt from PI */
@@ -948,9 +1097,19 @@ static void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
 	 * from priority 0 realtime in first place to the lowest priority
 	 * idleprio tasks last. Skiplist insertion is an O(log n) process.
 	 */
+	/*
+	 * Charge for device time and kernel work consumed since this task was
+	 * last queued. Consumed unconditionally so debt cannot accumulate
+	 * while a task is realtime, but only applied below, since realtime and
+	 * iso tasks sort by priority rather than by deadline and so are never
+	 * demoted.
+	 */
+	penalty = consume_task_penalty(p);
+
 	if (p->prio <= ISO_PRIO) {
 		sl_id = p->prio;
 	} else {
+		p->deadline += penalty;
 		sl_id = p->deadline;
 		if (idleprio_task(p)) {
 			if (p->prio == IDLE_PRIO)
@@ -2654,6 +2813,9 @@ int sched_fork(u64 __maybe_unused clone_flags, struct task_struct *p)
 #ifdef CONFIG_SMP
 	p->wake_entry.u_flags = CSD_TYPE_TTWU;
 #endif
+	/* A new task starts with no I/O history of its own. */
+	muqss_iotime_task_init(p);
+
 	/*
 	 * We mark the process as NEW here. This guarantees that
 	 * nobody will actually run it, and a signal or other external
@@ -4047,6 +4209,48 @@ static void update_cpu_clock_switch(struct rq *rq, struct task_struct *p)
 		p->time_slice -= NS_TO_US(account_ns);
 }
 
+#ifdef CONFIG_MUQSS_IOTIME
+/*
+ * The CPU time current has consumed so far, for measuring how long a stretch
+ * of work took the thread doing it.
+ *
+ * ->sched_time alone is not enough. It is banked at ticks and at context
+ * switches, and a kworker's switches happen at the ends of a whole batch of
+ * work items, so the delta across any one of them is usually a flat zero. The
+ * unbanked remainder has to be added in, and that means reading a clock:
+ * sched_clock_cpu() rather than rq->niffies, which is only refreshed under
+ * the rq lock and would be stale by up to a tick here.
+ *
+ * niffies is monotonised forward of the raw clock, so last_ran can be ahead
+ * of what we read and the remainder can come out negative. Drop it in that
+ * case; it is bounded by the skew between the two and the banked figure is
+ * still right.
+ *
+ * Interrupts are off across the read so the tick cannot land between taking
+ * ->sched_time and taking ->last_ran and have the interval counted in both.
+ * That also pins us to this CPU, which is what makes the subtraction a
+ * same-clock one.
+ */
+u64 muqss_task_runtime_live(void)
+{
+	struct task_struct *p = current;
+	unsigned long flags;
+	s64 remainder;
+	u64 ns, ran;
+
+	local_irq_save(flags);
+	ns = p->sched_time;
+	ran = p->last_ran;
+	remainder = sched_clock_cpu(smp_processor_id()) - ran;
+	local_irq_restore(flags);
+
+	if (likely(remainder > 0))
+		ns += remainder;
+
+	return ns;
+}
+#endif
+
 /*
  * Return any ns on the sched_clock that have not yet been accounted in
  * @p in case that task is currently running.
@@ -4485,7 +4689,13 @@ static inline unsigned long get_preempt_disable_ip(struct task_struct *p)
 static void time_slice_expired(struct task_struct *p, struct rq *rq)
 {
 	p->time_slice = timeslice();
-	p->deadline = rq->niffies + task_deadline_diff(p);
+	/*
+	 * This assignment is absolute, so the charge has to be folded in here
+	 * rather than left to enqueue_task(), or expiry would reset the task
+	 * to an uncharged baseline.
+	 */
+	p->deadline = rq->niffies + task_deadline_diff(p) +
+		      consume_task_penalty(p);
 #ifdef CONFIG_SMT_NICE
 	if (!p->mm)
 		p->smt_bias = 0;

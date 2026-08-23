@@ -19,6 +19,7 @@
 #include <linux/blk-crypto.h>
 #include <linux/xarray.h>
 #include <linux/kmemleak.h>
+#include <linux/muqss_iotime.h>
 
 #include <trace/events/block.h>
 #include "blk.h"
@@ -185,6 +186,8 @@ void bio_uninit(struct bio *bio)
 		bio->bi_blkg = NULL;
 	}
 #endif
+	muqss_iotime_put_owner(bio);
+
 	if (bio_integrity(bio))
 		bio_integrity_free(bio);
 
@@ -234,12 +237,17 @@ void bio_init(struct bio *bio, struct block_device *bdev, struct bio_vec *table,
 	bio->bi_private = NULL;
 #ifdef CONFIG_BLK_CGROUP
 	bio->bi_blkg = NULL;
-	bio->issue_time_ns = 0;
 	if (bdev)
 		bio_associate_blkg(bio);
 #ifdef CONFIG_BLK_CGROUP_IOCOST
 	bio->bi_iocost_cost = 0;
 #endif
+#endif
+#if defined(CONFIG_BLK_CGROUP) || defined(CONFIG_MUQSS_IOTIME)
+	bio->issue_time_ns = 0;
+#endif
+#ifdef CONFIG_MUQSS_IOTIME
+	bio->bi_muqss_owner = NULL;
 #endif
 #ifdef CONFIG_BLK_INLINE_ENCRYPTION
 	bio->bi_crypt_context = NULL;
@@ -867,6 +875,7 @@ static int __bio_clone(struct bio *bio, struct bio *bio_src, gfp_t gfp)
 			bio_set_flag(bio, BIO_REMAPPED);
 		bio_clone_blkg_association(bio, bio_src);
 	}
+	muqss_iotime_clone_owner(bio, bio_src);
 
 	if (bio_crypt_clone(bio, bio_src, gfp) < 0)
 		return -ENOMEM;
@@ -1814,6 +1823,7 @@ again:
 		bio->bi_blkg = NULL;
 	}
 #endif
+	muqss_iotime_put_owner(bio);
 
 	if (bio->bi_end_io)
 		bio->bi_end_io(bio);

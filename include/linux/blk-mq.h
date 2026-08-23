@@ -137,6 +137,23 @@ struct request {
 	/* Time that I/O was submitted to the device. */
 	u64 io_start_time_ns;
 
+#ifdef CONFIG_MUQSS_IOTIME
+	/*
+	 * Task this request is being served for, holding a reference. Set
+	 * once from the first bio and cleared if a merge brings in a bio
+	 * belonging to somebody else, since occupancy cannot be split
+	 * between owners at completion time.
+	 */
+	struct task_struct *muqss_owner;
+	/*
+	 * Completion time, captured where the block layer already takes it.
+	 * rq_qos_done() runs after blk_update_request() has completed every
+	 * bio, so a timestamp taken there would include the completion path
+	 * and overstate device service time.
+	 */
+	u64 muqss_done_ns;
+#endif
+
 #ifdef CONFIG_BLK_WBT
 	unsigned short wbt_flags;
 #endif

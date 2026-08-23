@@ -113,9 +113,39 @@
 			    ZONES_WIDTH - LRU_GEN_WIDTH - SECTIONS_WIDTH - \
 			    NODES_WIDTH - KASAN_TAG_WIDTH - LAST_CPUPID_WIDTH)
 
+/*
+ * MuQSS I/O aware scheduling stores an index into its owner table here, so
+ * that a page dirtied now can be charged to the task that dirtied it when it
+ * is written back later by a flusher thread.
+ *
+ * These bits are affordable because MuQSS excludes NUMA balancing, which is
+ * the only user of LAST_CPUPID: with CONFIG_NUMA_BALANCING off,
+ * LAST_CPUPID_SHIFT is 0 and its share of page->flags is unclaimed.
+ *
+ * Taken last so nothing else has to shrink. __LRU_REFS_WIDTH rather than
+ * LRU_REFS_WIDTH is used below because the latter is a min() expression and
+ * so cannot be evaluated by the preprocessor; the two are equal whenever
+ * there is room for MGLRU's full allocation, which is the only case in which
+ * anything is left over for us anyway.
+ */
+#ifdef CONFIG_MUQSS_IOTIME
+#define MUQSS_IOWNER_SHIFT	8
+#else
+#define MUQSS_IOWNER_SHIFT	0
+#endif
+
+#if ZONES_WIDTH + LRU_GEN_WIDTH + SECTIONS_WIDTH + NODES_WIDTH + \
+	KASAN_TAG_WIDTH + LAST_CPUPID_WIDTH + __LRU_REFS_WIDTH + \
+	MUQSS_IOWNER_SHIFT <= BITS_PER_LONG - NR_PAGEFLAGS
+#define MUQSS_IOWNER_WIDTH	MUQSS_IOWNER_SHIFT
+#else
+#define MUQSS_IOWNER_WIDTH	0
+#endif
+
 #define NR_NON_PAGEFLAG_BITS	(SECTIONS_WIDTH + NODES_WIDTH + ZONES_WIDTH + \
 				LAST_CPUPID_SHIFT + KASAN_TAG_WIDTH + \
-				LRU_GEN_WIDTH + LRU_REFS_WIDTH)
+				LRU_GEN_WIDTH + LRU_REFS_WIDTH + \
+				MUQSS_IOWNER_WIDTH)
 
 #define NR_UNUSED_PAGEFLAG_BITS	(BITS_PER_LONG - \
 				(NR_NON_PAGEFLAG_BITS + NR_PAGEFLAGS))

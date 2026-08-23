@@ -2460,6 +2460,61 @@ static inline bool folio_use_access_time(struct folio *folio)
 }
 #endif /* CONFIG_NUMA_BALANCING */
 
+#if MUQSS_IOWNER_WIDTH
+/*
+ * MuQSS I/O owner tag: an index into the owner table in block/blk-iotime.c,
+ * recorded when a folio is dirtied so that the writeback issued for it later
+ * by a flusher thread can still be charged to the task responsible. Zero
+ * means no owner.
+ *
+ * The tag itself is lossy by design: which of two racing dirtiers wins the
+ * field does not matter, and a wrong answer costs one misattributed
+ * writeback. The *word* is not ours to be lossy with, though. Other fields in
+ * folio->flags are updated by atomic bit operations from contexts that do not
+ * hold the folio lock -- PG_waiters is set by lock waiters, and losing it
+ * skips the wakeup on unlock -- so a plain read-modify-write store here would
+ * discard concurrent updates to unrelated bits. Update the field the way
+ * folio_xchg_last_cpupid() does, with a cmpxchg loop that touches only our
+ * own bits.
+ */
+static inline unsigned int folio_io_owner(const struct folio *folio)
+{
+	return (READ_ONCE(folio->flags.f) >> MUQSS_IOWNER_PGSHIFT) &
+	       MUQSS_IOWNER_MASK;
+}
+
+static inline void folio_set_io_owner(struct folio *folio, unsigned int slot)
+{
+	unsigned long old_flags, flags;
+
+	old_flags = READ_ONCE(folio->flags.f);
+	do {
+		flags = old_flags;
+		flags &= ~(MUQSS_IOWNER_MASK << MUQSS_IOWNER_PGSHIFT);
+		flags |= ((unsigned long)slot & MUQSS_IOWNER_MASK) <<
+			 MUQSS_IOWNER_PGSHIFT;
+	} while (unlikely(!try_cmpxchg(&folio->flags.f, &old_flags, flags)));
+}
+
+static inline void page_io_owner_reset(struct page *page)
+{
+	page->flags.f &= ~(MUQSS_IOWNER_MASK << MUQSS_IOWNER_PGSHIFT);
+}
+#else
+static inline unsigned int folio_io_owner(const struct folio *folio)
+{
+	return 0;
+}
+
+static inline void folio_set_io_owner(struct folio *folio, unsigned int slot)
+{
+}
+
+static inline void page_io_owner_reset(struct page *page)
+{
+}
+#endif /* MUQSS_IOWNER_WIDTH */
+
 #if defined(CONFIG_KASAN_SW_TAGS) || defined(CONFIG_KASAN_HW_TAGS)
 
 /*

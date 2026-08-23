@@ -14,6 +14,7 @@ obj-y		:= bdev.o fops.o bio.o elevator.o blk-core.o blk-sysfs.o \
 			disk-events.o blk-ia-ranges.o early-lookup.o
 
 obj-$(CONFIG_BLK_ERROR_INJECTION) += error-injection.o
+obj-$(CONFIG_MUQSS_IOTIME)	+= blk-iotime.o
 obj-$(CONFIG_BLK_DEV_BSG_COMMON) += bsg.o
 obj-$(CONFIG_BLK_DEV_BSGLIB)	+= bsg-lib.o
 obj-$(CONFIG_BLK_CGROUP)	+= blk-cgroup.o

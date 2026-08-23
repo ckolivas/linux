@@ -41,6 +41,7 @@
 #include "blk-stat.h"
 #include "blk-mq-sched.h"
 #include "blk-rq-qos.h"
+#include <linux/muqss_iotime.h>
 
 static DEFINE_PER_CPU(struct llist_head, blk_cpu_done);
 static DEFINE_PER_CPU(call_single_data_t, blk_cpu_csd);
@@ -398,12 +399,48 @@ static inline void blk_mq_rq_time_init(struct request *rq, u64 alloc_time_ns)
 #endif
 }
 
+/*
+ * Record the completion timestamp for MuQSS I/O accounting.
+ *
+ * rq_qos_done() is reached only after blk_update_request() has run bio_endio()
+ * on every bio of the request, so a timestamp taken inside the policy is later
+ * than the request actually finished, and lands after the per bio latency
+ * stamp. Occupancy then measures longer than the end to end latency it is
+ * supposed to be a subset of.
+ *
+ * Does not overwrite: the first caller to record a stamp is the earliest and
+ * therefore the most accurate one.
+ */
+static inline void blk_mq_set_iotime_done(struct request *rq, u64 now)
+{
+#ifdef CONFIG_MUQSS_IOTIME
+	if (!rq->muqss_done_ns)
+		rq->muqss_done_ns = now;
+#endif
+}
+
+/*
+ * Take the completion stamp before bio completion. Costs an extra timestamp
+ * on the completion path, which cannot be avoided by reusing the one taken
+ * for blk-stat: that one is deliberately read after blk_update_request() and
+ * moving it would change accounting shared with everybody else.
+ */
+static inline void blk_mq_capture_iotime_done(struct request *rq)
+{
+#ifdef CONFIG_MUQSS_IOTIME
+	if (blk_mq_need_time_stamp(rq))
+		rq->muqss_done_ns = blk_time_get_ns();
+#endif
+}
+
 static inline void blk_mq_bio_issue_init(struct request_queue *q,
 					 struct bio *bio)
 {
-#ifdef CONFIG_BLK_CGROUP
-	if (test_bit(QUEUE_FLAG_BIO_ISSUE_TIME, &q->queue_flags))
+#if defined(CONFIG_BLK_CGROUP) || defined(CONFIG_MUQSS_IOTIME)
+	if (test_bit(QUEUE_FLAG_BIO_ISSUE_TIME, &q->queue_flags)) {
 		bio->issue_time_ns = blk_time_get_ns();
+		muqss_iotime_set_owner(bio);
+	}
 #endif
 }
 
@@ -435,6 +472,10 @@ static struct request *blk_mq_rq_ctx_init(struct blk_mq_alloc_data *data,
 
 	rq->part = NULL;
 	rq->io_start_time_ns = 0;
+#ifdef CONFIG_MUQSS_IOTIME
+	rq->muqss_owner = NULL;
+	rq->muqss_done_ns = 0;
+#endif
 	rq->stats_sectors = 0;
 	rq->nr_phys_segments = 0;
 	rq->nr_integrity_segments = 0;
@@ -1127,8 +1168,12 @@ static inline void __blk_mq_end_request_acct(struct request *rq, u64 now)
 
 inline void __blk_mq_end_request(struct request *rq, blk_status_t error)
 {
-	if (blk_mq_need_time_stamp(rq))
-		__blk_mq_end_request_acct(rq, blk_time_get_ns());
+	if (blk_mq_need_time_stamp(rq)) {
+		u64 now = blk_time_get_ns();
+
+		blk_mq_set_iotime_done(rq, now);
+		__blk_mq_end_request_acct(rq, now);
+	}
 
 	blk_mq_finish_request(rq);
 
@@ -1144,6 +1189,7 @@ EXPORT_SYMBOL(__blk_mq_end_request);
 
 void blk_mq_end_request(struct request *rq, blk_status_t error)
 {
+	blk_mq_capture_iotime_done(rq);
 	if (blk_update_request(rq, error, blk_rq_bytes(rq)))
 		BUG();
 	__blk_mq_end_request(rq, error);
@@ -1178,8 +1224,10 @@ void blk_mq_end_request_batch(struct io_comp_batch *iob)
 		prefetch(rq->rq_next);
 
 		blk_complete_request(rq);
-		if (iob->need_ts)
+		if (iob->need_ts) {
+			blk_mq_set_iotime_done(rq, now);
 			__blk_mq_end_request_acct(rq, now);
+		}
 
 		blk_mq_finish_request(rq);
 
