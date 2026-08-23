@@ -3055,7 +3055,7 @@ static int cpuset_can_attach(struct cgroup_taskset *tset)
 			 */
 			cs->nr_migrate_dl_tasks++;
 			if (dl_task_needs_bw_move(task, cs->effective_cpus))
-				cs->sum_migrate_dl_bw += task->dl.dl_bw;
+				cs->sum_migrate_dl_bw += tsk_dl_bw(task);
 		}
 	}
 

@@ -1,0 +1,171 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# MuQSS - The Multiple Queue Skiplist Scheduler by Con Kolivas.
+#
+# Everything MuQSS needs from Kconfig lives in this file, including the
+# negative dependencies that disable mainline scheduler features MuQSS
+# replaces or does not implement. Kconfig merges properties from repeated
+# "config" blocks, so those features are gated here rather than by editing
+# each mainline Kconfig in place. The only change required outside this file
+# is a single source line in init/Kconfig.
+
+config SCHED_MUQSS
+	bool "MuQSS cpu scheduler"
+	# Architectures the port is built and tested on. Widening this needs
+	# arch review: <linux/sched/prio.h> gains a NORMAL_PRIO definition,
+	# which collides with the private one in
+	# arch/powerpc/platforms/cell/spufs/sched.c.
+	depends on X86 || ARM64
+	select HIGH_RES_TIMERS
+	default y
+	help
+	  The Multiple Queue Skiplist Scheduler for excellent interactivity and
+	  responsiveness on the desktop and highly scalable deterministic
+	  low latency on any hardware.
+
+	  Say Y here.
+
+config SMT_NICE
+	bool "SMT (Hyperthreading) aware nice priority and policy support"
+	depends on SCHED_MUQSS && SCHED_SMT
+	default y
+	help
+	  Enabling Hyperthreading on Intel CPUs decreases the effectiveness
+	  of the use of 'nice' levels and different scheduling policies
+	  (e.g. realtime) due to sharing of CPU power between hyperthreads.
+	  SMT nice support makes each logical CPU aware of what is running on
+	  its hyperthread siblings, maintaining appropriate distribution of
+	  CPU according to nice levels and scheduling policies at the expense
+	  of slightly increased overhead.
+
+	  If unsure say Y here.
+
+choice
+	depends on SMP
+	prompt "CPU scheduler runqueue sharing"
+	default RQ_MC if SCHED_MUQSS
+	default RQ_NONE
+
+config RQ_NONE
+	bool "No sharing"
+	help
+	  This is the default behaviour where the CPU scheduler has one runqueue
+	  per CPU, whether it is a physical or logical CPU (hyperthread).
+
+	  This can still be enabled runtime with the boot parameter
+	  rqshare=none
+
+	  If unsure, say N.
+
+config RQ_SMT
+	bool "SMT (hyperthread) siblings"
+	depends on SCHED_SMT && SCHED_MUQSS
+
+	help
+	  With this option enabled, the CPU scheduler will have one runqueue
+	  shared by SMT (hyperthread) siblings. As these logical cores share
+	  one physical core, sharing the runqueue resource can lead to decreased
+	  overhead, lower latency and higher throughput.
+
+	  This can still be enabled runtime with the boot parameter
+	  rqshare=smt
+
+	  If unsure, say N.
+
+config RQ_MC
+	bool "Multicore siblings"
+	depends on SCHED_MC && SCHED_MUQSS
+	help
+	  With this option enabled, the CPU scheduler will have one runqueue
+	  shared by multicore siblings in addition to any SMT siblings.
+	  As these physical cores share caches, sharing the runqueue resource
+	  will lead to lower latency, but its effects on overhead and throughput
+	  are less predictable. As a general rule, 6 or fewer cores will likely
+	  benefit from this, while larger CPUs will only derive a latency
+	  benefit. If your workloads are primarily single threaded, this will
+	  possibly worsen throughput. If you are only concerned about latency
+	  then enable this regardless of how many cores you have.
+
+	  This can still be enabled runtime with the boot parameter
+	  rqshare=mc
+
+	  If unsure, say Y.
+
+config RQ_MC_LLC
+	bool "Multicore siblings (LLC)"
+	depends on SCHED_MC && SCHED_MUQSS
+	help
+	  With this option enabled, the CPU scheduler will behave similarly as
+	  with "Multicore siblings".
+	  This option takes LLC cache into account when scheduling tasks.
+	  Option may benefit CPUs with multiple LLC caches, such as Ryzen
+	  and Xeon CPUs.
+
+	  This can still be enabled runtime with the boot parameter
+	  rqshare=llc
+
+	  If unsure, say N.
+
+config RQ_SMP
+	bool "Symmetric Multi-Processing"
+	depends on SMP && SCHED_MUQSS
+	help
+	  With this option enabled, the CPU scheduler will have one runqueue
+	  shared by all physical CPUs unless they are on separate NUMA nodes.
+	  As physical CPUs usually do not share resources, sharing the runqueue
+	  will normally worsen throughput but improve latency. If you only
+	  care about latency enable this.
+
+	  This can still be enabled runtime with the boot parameter
+	  rqshare=smp
+
+	  If unsure, say N.
+
+config RQ_ALL
+	bool "NUMA"
+	depends on SMP && SCHED_MUQSS
+	help
+	  With this option enabled, the CPU scheduler will have one runqueue
+	  regardless of the architecture configuration, including across NUMA
+	  nodes. This can substantially decrease throughput in NUMA
+	  configurations, but light NUMA designs will not be dramatically
+	  affected. This option should only be chosen if latency is the prime
+	  concern.
+
+	  This can still be enabled runtime with the boot parameter
+	  rqshare=all
+
+	  If unsure, say N.
+endchoice
+
+config SHARERQ
+	int
+	default 0 if RQ_NONE
+	default 1 if RQ_SMT
+	default 2 if RQ_MC
+	default 3 if RQ_MC_LLC
+	default 4 if RQ_SMP
+	default 5 if RQ_ALL
+
+#
+# Mainline features MuQSS replaces or does not implement are gated with
+# "depends on !SCHED_MUQSS" at their point of definition. Kconfig scopes a
+# "depends on" to the properties declared in the same config block, so a
+# dependency cannot be attached to a symbol from here; each gate has to live
+# beside the definition it constrains. They are:
+#
+#   init/Kconfig                              UCLAMP_TASK
+#                                             SCHED_PROXY_EXEC
+#                                             NUMA_BALANCING
+#                                             SCHED_MM_CID
+#                                             CGROUP_CPUACCT
+#                                             SCHED_AUTOGROUP
+#                                             RSEQ_SLICE_EXTENSION
+#                                             if CGROUP_SCHED (group scheduling
+#                                               block: FAIR_GROUP_SCHED,
+#                                               CFS_BANDWIDTH, RT_GROUP_SCHED,
+#                                               GROUP_SCHED_*, EXT_GROUP_SCHED)
+#   kernel/Kconfig.preempt                    PREEMPT_RT
+#                                             SCHED_CORE
+#                                             SCHED_CLASS_EXT
+#   kernel/trace/rv/monitors/deadline/Kconfig RV_MON_DEADLINE

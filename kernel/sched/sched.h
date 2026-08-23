@@ -5,6 +5,10 @@
 #ifndef _KERNEL_SCHED_SCHED_H
 #define _KERNEL_SCHED_SCHED_H
 
+#ifdef CONFIG_SCHED_MUQSS
+#include "MuQSS.h"
+#else /* CONFIG_SCHED_MUQSS */
+
 #include <linux/prandom.h>
 #include <linux/sched/affinity.h>
 #include <linux/sched/autogroup.h>
@@ -4212,5 +4216,7 @@ DEFINE_CLASS(sched_change, struct sched_change_ctx *,
 DEFINE_CLASS_IS_UNCONDITIONAL(sched_change)
 
 #include "ext/ext.h"
+
+#endif /* CONFIG_SCHED_MUQSS */
 
 #endif /* _KERNEL_SCHED_SCHED_H */

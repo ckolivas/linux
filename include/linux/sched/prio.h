@@ -16,6 +16,21 @@
 #define MAX_RT_PRIO		100
 #define MAX_DL_PRIO		0
 
+#ifdef CONFIG_SCHED_MUQSS
+/*
+ * MuQSS ranks its non-RT policies immediately below the RT range, and has no
+ * deadline class. SCHED_IDLEPRIO is an alias for the SCHED_IDLE policy value.
+ */
+#define ISO_PRIO		(MAX_RT_PRIO)
+#define NORMAL_PRIO		(MAX_RT_PRIO + 1)
+#define IDLE_PRIO		(MAX_RT_PRIO + 2)
+#define PRIO_LIMIT		((IDLE_PRIO) + 1)
+
+#define SCHED_IDLEPRIO		SCHED_IDLE
+#define SCHED_MAX		(SCHED_IDLEPRIO)
+#define SCHED_RANGE(policy)	((policy) <= SCHED_MAX)
+#endif /* CONFIG_SCHED_MUQSS */
+
 #define MAX_PRIO		(MAX_RT_PRIO + NICE_WIDTH)
 #define DEFAULT_PRIO		(MAX_RT_PRIO + NICE_WIDTH / 2)
 
