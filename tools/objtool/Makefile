@@ -99,14 +99,25 @@ LIBOPCODES_LIBS := $(shell \
 HAVE_DISASM_STYLED := $(shell echo '$(pound)include <dis-asm.h>' | \
 			$(HOSTCC) -E -xc - 2>/dev/null | grep -q disassembler_style && echo y)
 
+#
+# Linking -lopcodes can succeed when the shared library is present without
+# development headers. That is common on Gentoo without sys-libs/binutils-libs
+# (bfd.h lives under /usr/lib64/binutils/<tuple>/<ver>/include, not
+# /usr/include). Do not enable DISAS unless the headers actually compile.
+#
+HAVE_DISAS_HEADERS := $(shell printf "$(pound)include <bfd.h>\n$(pound)include <dis-asm.h>\nint main(void) { return 0; }\n" | \
+			$(HOSTCC) $(HOSTCFLAGS) -DPACKAGE='"objtool"' -xc - -c -o /dev/null 2>/dev/null && echo y)
+
 BUILD_DISAS := n
 
 ifneq ($(LIBOPCODES_LIBS),)
+ifeq ($(HAVE_DISAS_HEADERS),y)
 	BUILD_DISAS := y
 	OBJTOOL_CFLAGS += -DDISAS -DPACKAGE='"objtool"'
 	OBJTOOL_LDFLAGS += $(LIBOPCODES_LIBS)
 ifeq ($(HAVE_DISASM_STYLED),y)
 	OBJTOOL_CFLAGS += -DDISASM_INIT_STYLED
+endif
 endif
 endif
 
