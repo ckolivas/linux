@@ -1236,13 +1236,23 @@ remove_and_enqueue_same_base(struct hrtimer *timer, struct hrtimer_clock_base *b
 {
 	bool was_first = false;
 
+	/*
+	 * Updating the sort key while @timer is queued can temporarily
+	 * make the tree inconsistent. This is safe under cpu_base->lock:
+	 * no other queue operation can observe that state.
+	 * hrtimer_can_update_in_place() either confirms that the new expiry
+	 * fits between the neighbours or timerqueue_linked_del() removes the
+	 * timer without consulting the expiry.
+	 */
+	hrtimer_set_expires_range_ns(timer, expires, delta_ns);
+	expires = hrtimer_get_expires(timer);
+
 	/* Remove it from the timer queue if active */
 	if (timer->is_queued) {
 		was_first = !timerqueue_linked_prev(&timer->node);
 
 		/* Try to update in place to avoid the de/enqueue dance */
 		if (hrtimer_can_update_in_place(timer, base, expires)) {
-			hrtimer_set_expires_range_ns(timer, expires, delta_ns);
 			trace_hrtimer_start(timer, mode, true);
 			if (was_first)
 				base->expires_next = expires;
@@ -1252,9 +1262,6 @@ remove_and_enqueue_same_base(struct hrtimer *timer, struct hrtimer_clock_base *b
 		debug_hrtimer_deactivate(timer);
 		timerqueue_linked_del(&base->active, &timer->node);
 	}
-
-	/* Set the new expiry time */
-	hrtimer_set_expires_range_ns(timer, expires, delta_ns);
 
 	debug_activate(timer, mode, timer->is_queued);
 	base->cpu_base->active_bases |= 1 << base->index;
@@ -2228,8 +2235,10 @@ retry:
 	expires_next = hrtimer_update_next_event(cpu_base);
 	cpu_base->hang_detected = false;
 	if (expires_next < now) {
-		if (++retries < 3)
+		if (++retries < 3) {
+			cpu_base->nr_retries++;
 			goto retry;
+		}
 
 		delta = ktime_sub(now, entry_time);
 		cpu_base->max_hang_time = max_t(unsigned int, cpu_base->max_hang_time, delta);

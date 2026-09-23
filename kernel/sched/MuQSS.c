@@ -2365,9 +2365,9 @@ static int valid_task_cpu(struct task_struct *p)
 	if (unlikely(!cpumask_weight(&valid_mask))) {
 		if ((p->flags & PF_KTHREAD) && num_online_cpus())
 			return cpumask_any(cpu_online_mask);
-		/* We shouldn't be hitting this any more */
-		printk(KERN_WARNING "SCHED: No cpumask for %s/%d weight %d\n", p->comm,
-		       p->pid, cpumask_weight(p->cpus_ptr));
+		/* Defer console access while holding the task's PI lock. */
+		printk_deferred(KERN_WARNING "SCHED: No cpumask for %s/%d weight %d\n",
+				p->comm, p->pid, cpumask_weight(p->cpus_ptr));
 		return cpumask_any(p->cpus_ptr);
 	}
 	return cpumask_any(&valid_mask);
@@ -10469,6 +10469,16 @@ void rt_mutex_pre_schedule(void)
 	sched_submit_work(current);
 }
 
+/* Futex callers cannot have worker state or plugged IO to submit. */
+void rt_mutex_futex_pre_schedule(void)
+{
+	lockdep_assert(!(current->flags & (PF_WQ_WORKER | PF_IO_WORKER)));
+	lockdep_assert(!current->plug);
+#ifdef CONFIG_RT_MUTEXES
+	lockdep_assert(!fetch_and_set(current->sched_rt_mutex, 1));
+#endif
+}
+
 void rt_mutex_schedule(void)
 {
 #ifdef CONFIG_RT_MUTEXES
@@ -10480,6 +10490,13 @@ void rt_mutex_schedule(void)
 void rt_mutex_post_schedule(void)
 {
 	sched_update_worker(current);
+#ifdef CONFIG_RT_MUTEXES
+	lockdep_assert(fetch_and_set(current->sched_rt_mutex, 0));
+#endif
+}
+
+void rt_mutex_futex_post_schedule(void)
+{
 #ifdef CONFIG_RT_MUTEXES
 	lockdep_assert(fetch_and_set(current->sched_rt_mutex, 0));
 #endif

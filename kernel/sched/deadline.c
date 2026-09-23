@@ -2734,15 +2734,17 @@ static int balance_dl(struct rq *rq, struct rq_flags *rf)
  */
 static void wakeup_preempt_dl(struct rq *rq, struct task_struct *p, int flags)
 {
+	struct task_struct *donor = rq->donor;
 	/*
 	 * Can only get preempted by stop-class, and those should be
 	 * few and short lived, doesn't really make sense to push
 	 * anything away for that.
 	 */
-	if (p->sched_class != &dl_sched_class)
+	if (p->sched_class != &dl_sched_class ||
+	    donor->sched_class != &dl_sched_class)
 		return;
 
-	if (dl_entity_preempt(&p->dl, &rq->donor->dl)) {
+	if (dl_entity_preempt(&p->dl, &donor->dl)) {
 		resched_curr(rq);
 		return;
 	}
@@ -3026,8 +3028,8 @@ static struct task_struct *pick_next_pushable_dl_task(struct rq *rq)
 	next_node = rb_first_cached(&rq->dl.pushable_dl_tasks_root);
 	while (next_node) {
 		i = __node_2_pdl(next_node);
-		/* make sure task isn't on_cpu (possible with proxy-exec) */
-		if (!task_on_cpu(rq, i)) {
+		/* skip tasks that cannot be migrated */
+		if (!task_on_cpu(rq, i) && !is_migration_disabled(i)) {
 			p = i;
 			break;
 		}

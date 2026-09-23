@@ -274,8 +274,6 @@ static int ethosu_device_suspend(struct device *dev)
 
 static int ethosu_sram_init(struct ethosu_device *ethosudev)
 {
-	ethosudev->npu_info.sram_size = 0;
-
 	ethosudev->srampool = of_gen_pool_get(ethosudev->base.dev->of_node, "sram", 0);
 	if (!ethosudev->srampool)
 		return 0;
@@ -286,6 +284,7 @@ static int ethosu_sram_init(struct ethosu_device *ethosudev)
 							     ethosudev->npu_info.sram_size,
 							     &ethosudev->sramphys);
 	if (!ethosudev->sram) {
+		ethosudev->npu_info.sram_size = 0;
 		dev_err(ethosudev->base.dev, "failed to allocate from SRAM pool\n");
 		return -ENOMEM;
 	}
@@ -342,6 +341,8 @@ static int ethosu_probe(struct platform_device *pdev)
 	dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(40));
 
 	ethosudev->regs = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(ethosudev->regs))
+		return PTR_ERR(ethosudev->regs);
 
 	ethosudev->num_clks = devm_clk_bulk_get_all(&pdev->dev, &ethosudev->clks);
 	if (ethosudev->num_clks < 0)

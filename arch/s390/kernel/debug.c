@@ -993,8 +993,8 @@ void debug_register_static(debug_info_t *id, int pages_per_area, int nr_areas)
 	mutex_unlock(&debug_mutex);
 }
 
-/* Remove debugfs entries and remove from internal list. */
-static void _debug_unregister(debug_info_t *id)
+/* Remove debugfs entries. */
+static void _debug_unregister_debugfs(debug_info_t *id)
 {
 	int i;
 
@@ -1004,6 +1004,11 @@ static void _debug_unregister(debug_info_t *id)
 		debugfs_remove(id->debugfs_entries[i]);
 	}
 	debugfs_remove(id->debugfs_root_entry);
+}
+
+/* Remove from internal list. */
+static void _debug_unregister(debug_info_t *id)
+{
 	if (id == debug_area_first)
 		debug_area_first = id->next;
 	if (id == debug_area_last)
@@ -1029,6 +1034,7 @@ void debug_unregister(debug_info_t *id)
 	mutex_lock(&debug_mutex);
 	_debug_unregister(id);
 	mutex_unlock(&debug_mutex);
+	_debug_unregister_debugfs(id);
 
 	debug_info_put(id);
 }
@@ -1068,9 +1074,6 @@ static void _debug_set_level(debug_info_t *id, int new_level)
 {
 	unsigned long flags;
 
-	if (!id)
-		return;
-
 	if (new_level == DEBUG_OFF_LEVEL) {
 		pr_info("%s: switched off\n", id->name);
 	} else if ((new_level > DEBUG_MAX_LEVEL) || (new_level < 0)) {
@@ -1095,6 +1098,9 @@ static void _debug_set_level(debug_info_t *id, int new_level)
  */
 void debug_set_level(debug_info_t *id, int new_level)
 {
+	if (!id)
+		return;
+
 	/* Level specified via kernel parameter takes precedence */
 	debug_get_param(id->name, &new_level, NULL);
 

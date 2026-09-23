@@ -693,6 +693,8 @@ static bool ntfs_non_resident_attr_value_is_valid(const struct attr_record *a)
 	u32 attr_len;
 	u32 min_len;
 	u16 mp_offset;
+	u16 name_offset;
+	u32 name_end;
 
 	attr_len = le32_to_cpu(a->length);
 	min_len = offsetof(struct attr_record, data.non_resident.initialized_size) +
@@ -701,7 +703,27 @@ static bool ntfs_non_resident_attr_value_is_valid(const struct attr_record *a)
 		return false;
 
 	mp_offset = le16_to_cpu(a->data.non_resident.mapping_pairs_offset);
-	return mp_offset >= min_len && mp_offset <= attr_len;
+	if (mp_offset < min_len || mp_offset > attr_len)
+		return false;
+
+	if (a->name_length) {
+		name_offset = le16_to_cpu(a->name_offset);
+
+		if (name_offset < min_len || name_offset >= attr_len)
+			return false;
+
+		name_end = name_offset + a->name_length * sizeof(__le16);
+		if (name_end > attr_len || name_end > mp_offset)
+			return false;
+	}
+
+	/* Ensure there's room for the compressed_size field if needed. */
+	if (!(a->flags & (ATTR_IS_SPARSE | ATTR_COMPRESSION_MASK)) &&
+	    attr_len - mp_offset <
+			sizeof(a->data.non_resident.compressed_size))
+		return false;
+
+	return true;
 }
 
 static bool ntfs_attr_value_is_valid(struct ntfs_volume *vol,
@@ -1710,8 +1732,8 @@ static struct attr_def *ntfs_attr_find_in_attrdef(const struct ntfs_volume *vol,
 	struct attr_def *ad;
 
 	WARN_ON(!type);
-	for (ad = vol->attrdef; (u8 *)ad - (u8 *)vol->attrdef <
-			vol->attrdef_size && ad->type; ++ad) {
+	for (ad = vol->attrdef; (u8 *)ad - (u8 *)vol->attrdef <=
+	     vol->attrdef_size - (s32)sizeof(*ad) && ad->type; ++ad) {
 		/* We have not found it yet, carry on searching. */
 		if (likely(le32_to_cpu(ad->type) < le32_to_cpu(type)))
 			continue;
@@ -2473,7 +2495,7 @@ int ntfs_resident_attr_record_add(struct ntfs_inode *ni, __le32 type,
 	return offset;
 put_err_out:
 	ntfs_attr_put_search_ctx(ctx);
-	return -EIO;
+	return err;
 }
 
 /*
@@ -2612,7 +2634,7 @@ static int ntfs_non_resident_attr_record_add(struct ntfs_inode *ni, __le32 type,
 	return offset;
 put_err_out:
 	ntfs_attr_put_search_ctx(ctx);
-	return -1;
+	return err;
 }
 
 /*
@@ -3531,8 +3553,13 @@ int ntfs_attr_record_move_away(struct ntfs_attr_search_ctx *ctx, int extra)
 	unmap_mft_record(ni);
 
 	err = ntfs_attr_record_move_to(ctx, ni);
-	if (err)
+	if (err) {
 		ntfs_error(sb, "Couldn't move attribute to MFT record");
+		if (ntfs_mft_record_free(base_ni->vol, ni))
+			ntfs_error(sb, "Couldn't free empty MFT record");
+		else
+			ntfs_inode_close(ni);
+	}
 
 	return err;
 }
@@ -5666,7 +5693,7 @@ int ntfs_attr_fallocate(struct ntfs_inode *ni, loff_t start, loff_t byte_len, bo
 								  lcn << vol->cluster_size_bits,
 								  alloc_cnt <<
 								  vol->cluster_size_bits);
-					if (err > 0)
+					if (err)
 						goto out;
 				}
 

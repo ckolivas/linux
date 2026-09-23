@@ -580,7 +580,7 @@ int write_mft_record_nolock(struct ntfs_inode *ni, struct mft_record *m, int syn
 	err = pre_write_mst_fixup((struct ntfs_record *)fixup_m, vol->mft_record_size);
 	if (err) {
 		ntfs_error(vol->sb, "Failed to apply mst fixups!");
-		goto err_out;
+		goto unmap_err_out;
 	}
 
 	folio_size = vol->mft_record_size / ni->mft_lcn_count;
@@ -645,6 +645,8 @@ done:
 	return 0;
 put_bio_out:
 	bio_put(bio);
+unmap_err_out:
+	kunmap_local(kaddr);
 err_out:
 	/*
 	 * The caller should mark the base inode as bad so no more I/O
@@ -2333,7 +2335,17 @@ mft_rec_already_initialized:
 		 * wrong with the previous mft record.
 		 */
 		seq_no = m->sequence_number;
-		usn = *(__le16 *)((u8 *)m + le16_to_cpu(m->usa_ofs));
+		/*
+		 * The mft record still holds unvalidated, MST-protected on-disk
+		 * bytes, so m->usa_ofs is untrusted here.  Only preserve the old
+		 * update sequence number if that offset is in bounds; otherwise
+		 * leave usn zero so it is not restored below.
+		 */
+		if (!(le16_to_cpu(m->usa_ofs) & 1) &&
+		    le16_to_cpu(m->usa_ofs) + sizeof(usn) <= vol->mft_record_size)
+			usn = *(__le16 *)((u8 *)m + le16_to_cpu(m->usa_ofs));
+		else
+			usn = 0;
 		err = ntfs_mft_record_layout(vol, bit, m);
 		if (unlikely(err)) {
 			ntfs_error(vol->sb, "Failed to layout allocated mft record 0x%llx.",
