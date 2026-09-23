@@ -22,6 +22,8 @@
 #ifndef _LINUX_MUQSS_IOTIME_H
 #define _LINUX_MUQSS_IOTIME_H
 
+#include <linux/types.h>
+
 struct bio;
 struct folio;
 struct request;

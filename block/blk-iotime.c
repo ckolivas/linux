@@ -108,7 +108,8 @@ static inline struct blk_iotime *BLK_IOTIME(struct rq_qos *rqos)
 #define IOWNER_SLOTS		(1U << MUQSS_IOWNER_SHIFT)
 
 static struct task_struct *iowner_table[IOWNER_SLOTS];
-static DEFINE_SPINLOCK(iowner_lock);
+/* Work can be queued with a raw runqueue lock held (for example by PSI). */
+static DEFINE_RAW_SPINLOCK(iowner_lock);
 
 static atomic64_t iowner_exhausted;
 
@@ -128,6 +129,7 @@ static atomic64_t kernwork_ns;
 static unsigned int iotime_task_slot(struct task_struct *tsk)
 {
 	unsigned int slot, scan;
+	unsigned long flags;
 
 	if (!MUQSS_IOWNER_WIDTH)
 		return 0;
@@ -139,7 +141,7 @@ static unsigned int iotime_task_slot(struct task_struct *tsk)
 	if (tsk->flags & (PF_KTHREAD | PF_EXITING))
 		return 0;
 
-	spin_lock(&iowner_lock);
+	raw_spin_lock_irqsave(&iowner_lock, flags);
 
 	/*
 	 * Recheck PF_EXITING under the lock. It is set well before
@@ -179,7 +181,7 @@ claim:
 	iowner_table[slot] = get_task_struct(tsk);
 	WRITE_ONCE(tsk->io_owner_slot, slot);
 out:
-	spin_unlock(&iowner_lock);
+	raw_spin_unlock_irqrestore(&iowner_lock, flags);
 	return slot;
 }
 
@@ -223,7 +225,8 @@ void muqss_iotime_proxy_end(struct task_struct *prev)
 
 void muqss_work_set_owner(struct work_struct *work)
 {
-	work->muqss_owner_slot = muqss_iotime_owner_slot();
+	/* Interrupt work does not belong to the task it interrupted. */
+	work->muqss_owner_slot = in_task() ? muqss_iotime_owner_slot() : 0;
 }
 
 void muqss_kerntime_begin(struct muqss_kern_window *w, unsigned int slot)
@@ -277,14 +280,15 @@ void muqss_kerntime_end(struct muqss_kern_window *w)
 struct task_struct *muqss_iotime_owner_task(unsigned int slot)
 {
 	struct task_struct *tsk = NULL;
+	unsigned long flags;
 
 	if (!slot || slot >= IOWNER_SLOTS)
 		return NULL;
 
-	spin_lock(&iowner_lock);
+	raw_spin_lock_irqsave(&iowner_lock, flags);
 	if (iowner_table[slot])
 		tsk = get_task_struct(iowner_table[slot]);
-	spin_unlock(&iowner_lock);
+	raw_spin_unlock_irqrestore(&iowner_lock, flags);
 
 	return tsk;
 }
@@ -292,28 +296,28 @@ struct task_struct *muqss_iotime_owner_task(unsigned int slot)
 void muqss_iotime_release_slot(struct task_struct *p)
 {
 	unsigned int slot = READ_ONCE(p->io_owner_slot);
+	unsigned long flags;
 
 	if (!slot)
 		return;
 
-	spin_lock(&iowner_lock);
+	raw_spin_lock_irqsave(&iowner_lock, flags);
 	if (iowner_table[slot] == p) {
 		iowner_table[slot] = NULL;
 		WRITE_ONCE(p->io_owner_slot, 0);
-		spin_unlock(&iowner_lock);
+		raw_spin_unlock_irqrestore(&iowner_lock, flags);
 		put_task_struct(p);
 		return;
 	}
 	WRITE_ONCE(p->io_owner_slot, 0);
-	spin_unlock(&iowner_lock);
+	raw_spin_unlock_irqrestore(&iowner_lock, flags);
 }
 
 void muqss_iotime_dirty_folio(struct folio *folio)
 {
 	unsigned int slot = muqss_iotime_owner_slot();
 
-	if (slot)
-		folio_set_io_owner(folio, slot);
+	folio_set_io_owner(folio, slot);
 }
 
 void muqss_iotime_task_init(struct task_struct *p)
