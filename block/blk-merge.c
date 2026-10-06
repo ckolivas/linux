@@ -12,6 +12,8 @@
 
 #include <trace/events/block.h>
 
+#include <linux/muqss_iotime.h>
+
 #include "blk.h"
 #include "blk-mq-sched.h"
 #include "blk-rq-qos.h"
@@ -848,6 +850,7 @@ static struct request *attempt_merge(struct request_queue *q,
 	 * 'next' is going away, so update stats accordingly
 	 */
 	blk_account_io_merge_request(next);
+	muqss_iotime_merge_requests(req, next);
 
 	trace_block_rq_merge(next);
 

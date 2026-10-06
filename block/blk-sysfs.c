@@ -20,6 +20,7 @@
 #include "blk-cgroup.h"
 #include "blk-throttle.h"
 #include "error-injection.h"
+#include <linux/muqss_iotime.h>
 
 struct queue_sysfs_entry {
 	struct attribute attr;
@@ -993,6 +994,7 @@ int blk_register_queue(struct gendisk *disk)
 
 	blk_queue_flag_set(QUEUE_FLAG_REGISTERED, q);
 	wbt_init_enable_default(disk);
+	muqss_iotime_enable(disk);
 
 	/* Now everything is ready and send out KOBJ_ADD uevent */
 	kobject_uevent(&disk->queue_kobj, KOBJ_ADD);

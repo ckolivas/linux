@@ -521,6 +521,108 @@ static int proc_pid_schedstat(struct seq_file *m, struct pid_namespace *ns,
 }
 #endif
 
+#ifdef CONFIG_MUQSS_IOTIME
+/*
+ * Provides /proc/PID/iotime
+ *
+ * Block device time consumed on this task's behalf, in nanoseconds.
+ *
+ * io_latency_ns is end to end per bio and so includes queue wait: it is what
+ * this task waited for. io_occupancy_ns is device service time per request:
+ * it is what this task cost everybody else, and is what scheduling charges
+ * are based on. io_debt_ns is occupancy not yet charged to the deadline.
+ * See block/blk-iotime.c.
+ *
+ * kern_time_ns is CPU time rather than device time: kernel work done for this
+ * task in another thread's context, which today means kworkers running work
+ * items it queued. kern_debt_ns is the part of it not yet charged. Work the
+ * task asks for in its own context is not counted here, because that already
+ * comes out of its own timeslice.
+ *
+ * Access is restricted exactly as /proc/PID/io is, and for the same reason:
+ * these counters say when a task used the device and for how long, which is
+ * enough to infer a good deal about what it is doing. The exec_update_lock
+ * keeps the permission check and the read on the same side of an exec, so
+ * credentials cannot change between the two.
+ *
+ * Also as /proc/PID/io: the tgid file sums the thread group and the tid file
+ * reports one thread. Charging is per thread, since each has its own deadline,
+ * but a multithreaded writer's total is only meaningful summed.
+ */
+struct iotime_acct {
+	u64 latency_ns;
+	u64 count;
+	u64 occupancy_ns;
+	u64 debt_ns;
+	u64 kern_time_ns;
+	u64 kern_debt_ns;
+};
+
+static void iotime_add(struct iotime_acct *acct, struct task_struct *task)
+{
+	acct->latency_ns += atomic64_read(&task->io_latency_ns);
+	acct->count += atomic64_read(&task->io_count);
+	acct->occupancy_ns += atomic64_read(&task->io_occupancy_ns);
+	acct->debt_ns += atomic64_read(&task->io_debt_ns);
+	acct->kern_time_ns += atomic64_read(&task->kern_time_ns);
+	acct->kern_debt_ns += atomic64_read(&task->kern_debt_ns);
+}
+
+static int do_iotime_accounting(struct task_struct *task, struct seq_file *m,
+				int whole)
+{
+	struct iotime_acct acct = { };
+	int result;
+
+	result = down_read_killable(&task->signal->exec_update_lock);
+	if (result)
+		return result;
+
+	if (!ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS)) {
+		result = -EACCES;
+		goto out_unlock;
+	}
+
+	if (whole) {
+		struct task_struct *t;
+
+		rcu_read_lock();
+		for_each_thread(task, t)
+			iotime_add(&acct, t);
+		rcu_read_unlock();
+	} else {
+		iotime_add(&acct, task);
+	}
+
+	seq_printf(m,
+		   "io_latency_ns %llu\n"
+		   "io_count %llu\n"
+		   "io_occupancy_ns %llu\n"
+		   "io_debt_ns %llu\n"
+		   "kern_time_ns %llu\n"
+		   "kern_debt_ns %llu\n",
+		   acct.latency_ns, acct.count, acct.occupancy_ns,
+		   acct.debt_ns, acct.kern_time_ns, acct.kern_debt_ns);
+
+out_unlock:
+	up_read(&task->signal->exec_update_lock);
+	return result;
+}
+
+static int proc_tgid_iotime(struct seq_file *m, struct pid_namespace *ns,
+			    struct pid *pid, struct task_struct *task)
+{
+	return do_iotime_accounting(task, m, 1);
+}
+
+static int proc_tid_iotime(struct seq_file *m, struct pid_namespace *ns,
+			   struct pid *pid, struct task_struct *task)
+{
+	return do_iotime_accounting(task, m, 0);
+}
+
+#endif
+
 #ifdef CONFIG_LATENCYTOP
 static int lstats_show_proc(struct seq_file *m, void *v)
 {
@@ -3336,6 +3438,9 @@ static const struct pid_entry tgid_base_stuff[] = {
 #ifdef CONFIG_SCHED_INFO
 	ONE("schedstat",  S_IRUGO, proc_pid_schedstat),
 #endif
+#ifdef CONFIG_MUQSS_IOTIME
+	ONE("iotime",     S_IRUSR, proc_tgid_iotime),
+#endif
 #ifdef CONFIG_LATENCYTOP
 	REG("latency",  S_IRUGO, proc_lstats_operations),
 #endif
@@ -3690,6 +3795,9 @@ static const struct pid_entry tid_base_stuff[] = {
 #endif
 #ifdef CONFIG_SCHED_INFO
 	ONE("schedstat", S_IRUGO, proc_pid_schedstat),
+#endif
+#ifdef CONFIG_MUQSS_IOTIME
+	ONE("iotime",	S_IRUSR, proc_tid_iotime),
 #endif
 #ifdef CONFIG_LATENCYTOP
 	REG("latency",  S_IRUGO, proc_lstats_operations),
