@@ -89,6 +89,8 @@ static inline void rq_sched_info_depart  (struct rq *rq, unsigned long long delt
 
 #endif /* CONFIG_SCHEDSTATS */
 
+#ifndef CONFIG_SCHED_MUQSS
+/* Only reachable from fair.c, debug.c and core.c, none of which MuQSS builds. */
 static inline struct sched_statistics *
 __schedstats_from_se(struct sched_entity *se)
 {
@@ -98,6 +100,7 @@ __schedstats_from_se(struct sched_entity *se)
 #endif
 	return &task_of(se)->stats;
 }
+#endif /* CONFIG_SCHED_MUQSS */
 
 #ifdef CONFIG_PSI
 void psi_task_change(struct task_struct *task, int clear, int set);
@@ -135,6 +138,23 @@ static inline void psi_enqueue(struct task_struct *p, int flags)
 	if (task_on_cpu(task_rq(p), p))
 		return;
 
+#ifdef CONFIG_SCHED_MUQSS
+	/*
+	 * MuQSS has no delayed-dequeue (no task_struct::se), so a migration
+	 * always moves a runnable task and a non-migration is a wakeup.
+	 */
+	if (flags & ENQUEUE_MIGRATED) {
+		set = TSK_RUNNING;
+		if (p->in_memstall)
+			set |= TSK_MEMSTALL | TSK_MEMSTALL_RUNNING;
+	} else {
+		if (p->in_iowait)
+			clear |= TSK_IOWAIT;
+		set = TSK_RUNNING;
+		if (p->in_memstall)
+			set |= TSK_MEMSTALL_RUNNING;
+	}
+#else
 	if (p->se.sched_delayed) {
 		/* CPU migration of "sleeping" task */
 		WARN_ON_ONCE(!(flags & ENQUEUE_MIGRATED));
@@ -155,6 +175,7 @@ static inline void psi_enqueue(struct task_struct *p, int flags)
 		if (p->in_memstall)
 			set |= TSK_MEMSTALL_RUNNING;
 	}
+#endif /* CONFIG_SCHED_MUQSS */
 
 	psi_task_change(p, clear, set);
 }

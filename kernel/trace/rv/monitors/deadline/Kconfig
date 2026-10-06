@@ -1,5 +1,5 @@
 config RV_MON_DEADLINE
-	depends on RV
+	depends on RV && !SCHED_MUQSS
 	bool "deadline monitor"
 	help
 	  Collection of monitors to check the deadline scheduler and server
