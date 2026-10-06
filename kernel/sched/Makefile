@@ -23,12 +23,14 @@ ifneq ($(CONFIG_SCHED_OMIT_FRAME_POINTER),y)
 # I turn this off for IA-64 only.  Andreas Schwab says it's also needed on m68k
 # to get a correct value for the wait-channel (WCHAN in ps). --davidm
 CFLAGS_core.o := $(PROFILING) -fno-omit-frame-pointer
+CFLAGS_MuQSS.o := $(PROFILING) -fno-omit-frame-pointer
 endif
 
 # Branch profiling isn't noinstr-safe
 ifdef CONFIG_TRACE_BRANCH_PROFILING
 CFLAGS_build_policy.o += -DDISABLE_BRANCH_PROFILING
 CFLAGS_build_utility.o += -DDISABLE_BRANCH_PROFILING
+CFLAGS_build_muqss.o += -DDISABLE_BRANCH_PROFILING
 endif
 #
 # Build efficiency:
@@ -36,7 +38,12 @@ endif
 # These compilation units have roughly the same size and complexity - so their
 # build parallelizes well and finishes roughly at once:
 #
+ifdef CONFIG_SCHED_MUQSS
+obj-y += MuQSS.o
+obj-y += build_muqss.o
+else
 obj-y += core.o
 obj-y += fair.o
 obj-y += build_policy.o
 obj-y += build_utility.o
+endif

@@ -372,7 +372,7 @@ waiter_update_prio(struct rt_mutex_waiter *waiter, struct task_struct *task)
 	lockdep_assert(RB_EMPTY_NODE(&waiter->tree.entry));
 
 	waiter->tree.prio = __waiter_prio(task);
-	waiter->tree.deadline = task->dl.deadline;
+	waiter->tree.deadline = tsk_dl_deadline(task);
 }
 
 /*
@@ -393,7 +393,7 @@ waiter_clone_prio(struct rt_mutex_waiter *waiter, struct task_struct *task)
  * Only use with rt_waiter_node_{less,equal}()
  */
 #define task_to_waiter_node(p)	\
-	&(struct rt_waiter_node){ .prio = __waiter_prio(p), .deadline = (p)->dl.deadline }
+	&(struct rt_waiter_node){ .prio = __waiter_prio(p), .deadline = tsk_dl_deadline(p) }
 #define task_to_waiter(p)	\
 	&(struct rt_mutex_waiter){ .tree = *task_to_waiter_node(p) }
 
