@@ -101,6 +101,8 @@ void __init register_refined_jiffies(long cycles_per_second)
 #ifdef CONFIG_PROC_SYSCTL
 static ulong mult_hz(const ulong val)
 {
+	if (val >= ULONG_MAX / HZ)
+		return ULONG_MAX;
 	return val * HZ;
 }
 
@@ -181,7 +183,7 @@ static int do_proc_int_conv_ms_jiffies_minmax(bool *negp, ulong *u_ptr,
 					      int *k_ptr, int dir,
 					      const struct ctl_table *tbl)
 {
-	return proc_int_conv(negp, u_ptr, k_ptr, dir, tbl, false,
+	return proc_int_conv(negp, u_ptr, k_ptr, dir, tbl, true,
 			     sysctl_u2k_int_conv_ms, sysctl_k2u_int_conv_ms);
 }
 
