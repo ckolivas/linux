@@ -1584,15 +1584,19 @@ static inline unsigned int psi_migrate_begin(struct task_struct *p)
 {
 	unsigned int migrate = p->psi_flags & ~TSK_ONCPU;
 
-	if (migrate)
+	if (migrate) {
+		lockdep_assert_held(task_rq(p)->lock);
 		psi_task_change(p, migrate, 0);
+	}
 	return migrate;
 }
 
 static inline void psi_migrate_end(struct task_struct *p, unsigned int migrate)
 {
-	if (migrate)
+	if (migrate) {
+		lockdep_assert_held(task_rq(p)->lock);
 		psi_task_change(p, 0, migrate);
+	}
 }
 #else /* !CONFIG_PSI */
 static inline unsigned int psi_migrate_begin(struct task_struct *p)
@@ -3475,51 +3479,34 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 		 */
 		hrexpiry_schedule_exit(rq);
 		sched_info_dequeue(rq, prev);
-		/*
-		 * We move the ownership of prev to the new cpu now. Note that
-		 * this does not lock ttwu out: pointing task_cpu() at wake_cpu
-		 * below sends a concurrent ttwu_runnable() to the *new*
-		 * runqueue's lock rather than the one dropped here, and
-		 * __task_rq_lock() does not spin on task_on_rq_migrating() the
-		 * way mainline's does. See the re-check before enqueueing.
-		 *
-		 * This bypasses set_task_cpu(), so any PSI state prev is still
-		 * counted for has to be moved by hand, exactly as that does.
-		 * psi_sched_switch() saw prev off the CPU as a sleep, since it
-		 * is no longer queued, so a task in iowait is carrying
-		 * TSK_IOWAIT here and enqueue_task() below would clear it on
-		 * the new CPU that never counted it.
-		 */
-		migrate = psi_migrate_begin(prev);
-		task_thread_info(prev)->cpu = prev->wake_cpu;
-		psi_migrate_end(prev, migrate);
+		/* Take pi_lock before rq->lock to serialize with wakeups. */
 		raw_spin_unlock(rq->lock);
-
 		raw_spin_lock(&prev->pi_lock);
-		rq = __task_rq_lock(prev, NULL);
+		raw_spin_lock(rq->lock);
+
 		/*
-		 * Complete the handover only while it is still ours to
-		 * complete. ttwu() reaches prev here despite the comment
-		 * above: ttwu_runnable() only accepts TASK_ON_RQ_QUEUED, so a
-		 * wakeup that finds prev still TASK_ON_RQ_MIGRATING falls
-		 * through it and enqueues prev itself. Once it has, prev can be
-		 * picked and run on another CPU, and take_task() empties its
-		 * skiplist node again.
-		 *
-		 * task_queued() only asks whether that node is linked, so at
-		 * that point it reads "prev still needs enqueueing" when it
-		 * means "prev is running elsewhere", and puts a task that is on
-		 * a CPU back on a runqueue for a second CPU to pick up. One
-		 * task then runs on two CPUs off one stack, which shows up
-		 * downstream as skiplist corruption, PSI counting the task
-		 * twice, and a scribbled kernel stack.
-		 *
-		 * on_rq is what actually tracks the handover - return_task()
-		 * set TASK_ON_RQ_MIGRATING and whoever takes prev over clears
-		 * it - and pi_lock, held here and taken by ttwu() before it
-		 * does anything, serialises the two.
+		 * A wakeup or affinity change may have completed the handover
+		 * while the locks were dropped. TASK_WAKING also covers a
+		 * wakeup queued on a remote wake_list but not yet activated.
+		 * Leave those tasks to their new owner.
 		 */
-		if (likely(task_on_rq_migrating(prev))) {
+		if (likely(task_cpu(prev) == cpu_of(rq) &&
+			   task_on_rq_migrating(prev) &&
+			   READ_ONCE(prev->__state) != TASK_WAKING)) {
+			/*
+			 * PSI state is per CPU. Clear it under the source lock,
+			 * then restore it under the destination lock. Keep pi_lock
+			 * held across both operations so a wakeup cannot observe
+			 * the partial transfer. Only hold one rq lock at a time,
+			 * since the destination need not follow the source in
+			 * runqueue lock order (and may share the same lock).
+			 */
+			migrate = psi_migrate_begin(prev);
+			WRITE_ONCE(task_thread_info(prev)->cpu, prev->wake_cpu);
+			raw_spin_unlock(rq->lock);
+			rq = task_rq(prev);
+			raw_spin_lock(rq->lock);
+			psi_migrate_end(prev, migrate);
 			enqueue_task(rq, prev, 0);
 			prev->on_rq = TASK_ON_RQ_QUEUED;
 			/* Wake up the CPU if it's not already running */
