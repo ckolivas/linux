@@ -4586,6 +4586,12 @@ void sched_tick(void)
 
 	arch_scale_freq_tick();
 	sched_clock_tick();
+	if (IS_ENABLED(CONFIG_PSI) && IS_ENABLED(CONFIG_IRQ_TIME_ACCOUNTING)) {
+		/* Charge the executing task and serialize the per-CPU PSI update. */
+		rq_lock(rq);
+		psi_account_irqtime(rq, rq->curr, NULL);
+		rq_unlock(rq);
+	}
 	update_clocks(rq);
 	update_load_avg(rq, 0);
 	update_cpu_clock_tick(rq, rq->curr);
@@ -5234,6 +5240,7 @@ static void __sched notrace __schedule(int sched_mode)
 		 */
 		++*switch_count;
 
+		psi_account_irqtime(rq, prev, next);
 		psi_sched_switch(prev, next, !task_on_rq_queued(prev));
 
 		trace_sched_switch(preempt, prev, next, prev->__state);
