@@ -4950,13 +4950,20 @@ static void wake_no_siblings(struct rq __maybe_unused *this_rq) {}
 static void (*check_siblings)(struct rq *this_rq) = &check_no_siblings;
 static void (*wake_siblings)(struct rq *this_rq) = &wake_no_siblings;
 
-/* Iterate over smt siblings when we've scheduled a process on cpu and decide
- * whether they should continue running or be descheduled. */
+/*
+ * SMT topology masks retain offline siblings. Both sibling passes must only
+ * reschedule active CPUs, otherwise they can set NEED_RESCHED on an idle task
+ * that is entering the CPU-dead path. __schedule() calls these with interrupts
+ * disabled, so sched_cpu_deactivate()'s synchronize_rcu() drains any pass that
+ * saw the CPU active before it proceeds with offlining.
+ *
+ * Decide whether siblings should continue running or be descheduled.
+ */
 static void check_smt_siblings(struct rq *this_rq)
 {
 	int other_cpu;
 
-	for_each_cpu(other_cpu, &this_rq->thread_mask) {
+	for_each_cpu_and(other_cpu, &this_rq->thread_mask, cpu_active_mask) {
 		struct task_struct *p;
 		struct rq *rq;
 
@@ -4973,7 +4980,7 @@ static void wake_smt_siblings(struct rq *this_rq)
 {
 	int other_cpu;
 
-	for_each_cpu(other_cpu, &this_rq->thread_mask) {
+	for_each_cpu_and(other_cpu, &this_rq->thread_mask, cpu_active_mask) {
 		struct rq *rq;
 
 		rq = cpu_rq(other_cpu);
